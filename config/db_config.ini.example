@@ -1,0 +1,14 @@
+[mysql]
+user = your_db_user
+password = your_db_password
+database = your_database_name
+
+[backup]
+local_backup_dir = /path/to/local/backup
+
+[ssh]
+host = remote.server.com
+port = 22
+user = remote_user
+password = remote_password
+remote_backup_dir = /path/to/remote/backup

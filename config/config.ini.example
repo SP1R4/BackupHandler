@@ -1,0 +1,24 @@
+[DEFAULT]
+source_dir = /path/to/source
+mode = full
+compress_type = zip
+
+[BACKUPS]
+backup_dirs = /path/to/backup1, /path/to/backup2
+
+[SSH]
+ssh_servers = None
+username = None
+password = None
+
+[SCHEDULE]
+times = 03:00, 12:00
+interval_minutes = 60
+
+[MODES]
+local = True
+ssh = False
+
+[NOTIFICATIONS]
+bot = True
+receiver_emails = None
