@@ -1,0 +1,15 @@
+venv/
+skili/
+otp.json
+stored_passwords.txt
+*.log
+__pycache__/
+BackupTimestamp/
+interacted_users_ids.json
+
+# Config files with secrets — use the .example templates
+config/bot_config.ini
+config/email_config.ini
+config/db_config.ini
+config/config.ini
+.claude/

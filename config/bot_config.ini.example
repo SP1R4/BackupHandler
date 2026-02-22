@@ -1,0 +1,5 @@
+[TELEGRAM]
+api_token = YOUR_TELEGRAM_BOT_API_TOKEN
+
+[USERS]
+interacted_users = YOUR_USER_ID

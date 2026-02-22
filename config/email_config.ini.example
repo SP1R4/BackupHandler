@@ -1,0 +1,5 @@
+[EMAIL]
+sender_email = your_email@gmail.com
+app_password = YOUR_APP_PASSWORD
+smtp_host = smtp.gmail.com
+smtp_port = 465
