@@ -67,28 +67,28 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
                     │   main.py   │  ← CLI entry point & scheduler
                     └──────┬──────┘
                            │
-              ┌────────────┼────────────┐
-              │            │            │
-        ┌─────┴─────┐ ┌───┴───┐ ┌─────┴──────┐
-        │  src/sync  │ │ src/  │ │ src/       │
-        │  (backup   │ │config │ │compression │
-        │  engine)   │ │       │ │            │
-        └─────┬──────┘ └───────┘ └─────┬──────┘
+              ┌────────────┼───────────┐
+              │            │           │
+        ┌─────┴─────┐  ┌───┴───┐ ┌─────┴──────┐
+        │  src/sync │  │ src/  │ │ src/       │
+        │  (backup  │  │config │ │compression │
+        │  engine)  │  │       │ │            │
+        └─────┬─────┘  └───────┘ └─────┬──────┘
               │                        │
-     ┌────────┼────────┐          ┌────┴────┐
-     │        │        │          │ keyring  │
-  ┌──┴──┐ ┌──┴──┐ ┌───┴───┐     │ (secure  │
-  │Local│ │SFTP │ │Verify │     │ storage) │
-  │Copy │ │Upload│ │(SHA256)│    └─────────┘
-  └─────┘ └─────┘ └───────┘
+     ┌────────┼─────────┐         ┌────┴────┐
+     │        │         │         │ keyring │
+  ┌──┴──┐  ┌──┴───┐ ┌───┴───┐     │ (secure │
+  │Local│  │ SFTP │ │Verify │     │ storage)│
+  │Copy │  │Upload│ │SHA256 │     └─────────┘
+  └─────┘  └──────┘ └───────┘
               │
     ┌─────────┼─────────┐
     │         │         │
-┌───┴───┐ ┌──┴──┐ ┌────┴────┐
-│Telegram│ │Email│ │  Logger │
-│  Bot   │ │     │ │(rotating│
-│        │ │     │ │  files) │
-└────────┘ └─────┘ └─────────┘
+┌───┴───┐  ┌──┴──┐ ┌────┴────┐
+│  Tg   │  │Email│ │  Logger │
+│  Bot  │  │     │ │(rotating│
+│       │  │     │ │  files) │
+└───────┘  └─────┘ └─────────┘
 ```
 
 ---
