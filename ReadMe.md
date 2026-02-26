@@ -1,8 +1,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/platform-linux-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-1.1.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.0-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
@@ -25,6 +25,7 @@
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Backup Modes](#backup-modes)
+- [Running as a Startup Service](#running-as-a-startup-service)
 - [Notifications](#notifications)
 - [Security](#security)
 - [Logging](#logging)
@@ -56,6 +57,8 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Notifications** | Real-time alerts via Telegram bot and/or email with configurable SMTP |
 | **Integrity** | SHA-256 checksum verification on every copied file |
 | **Security** | No plaintext secrets on disk, passwords delivered via in-memory buffers, secure SSH policies |
+| **Config Validation** | Fail-fast validation with clear error messages pointing to exact config fields |
+| **Startup Service** | Cross-platform service installation (systemd, launchd, Task Scheduler) |
 | **MySQL Backup** | Database dump with SFTP transfer to remote servers (separate module) |
 
 ---
@@ -97,43 +100,47 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 
 ```
 backup_handler/
-├── main.py                     # Entry point, CLI handling, scheduler
-├── requirements.txt            # Python dependencies
+├── main.py                          # Entry point, CLI handling, scheduler
+├── requirements.txt                 # Python dependencies
 ├── .gitignore
 │
 ├── src/
-│   ├── argparse_setup.py       # CLI argument parsing and validation
-│   ├── backup.py               # File copy with checksum verification
-│   ├── compression.py          # ZIP compression, password-protected archives
-│   ├── config.py               # INI configuration loader and validator
-│   ├── logger.py               # Rotating file + console logger (AppLogger)
-│   ├── scheduler.py            # Interval-based backup scheduling
-│   ├── sync.py                 # Local sync, SFTP upload, backup operations
-│   ├── utils.py                # Checksums, OTP, timestamps, validation
-│   └── test.py                 # Email integration test
+│   ├── argparse_setup.py            # CLI argument parsing and validation
+│   ├── backup.py                    # File copy with checksum verification
+│   ├── compression.py               # ZIP compression, password-protected archives
+│   ├── config.py                    # INI config loader, validator, normalize_none()
+│   ├── logger.py                    # Rotating file + console logger (AppLogger)
+│   ├── scheduler.py                 # Interval-based backup scheduling
+│   ├── sync.py                      # Local sync, SFTP upload, backup operations
+│   ├── utils.py                     # Checksums, OTP, timestamps, validation
+│   └── test.py                      # Email integration test
 │
 ├── bot/
-│   └── BotHandler.py           # Telegram bot (notifications, documents, polling)
+│   └── BotHandler.py                # Telegram bot (notifications, documents, polling)
 │
 ├── email_nots/
-│   └── email.py                # SMTP email with attachments
+│   └── email.py                     # SMTP email with attachments
 │
 ├── db_backup/
-│   └── mysql_backup.py         # MySQL dump + SFTP transfer
+│   └── mysql_backup.py              # MySQL dump + SFTP transfer
 │
 ├── banner/
-│   └── banner_show.py          # CLI banner display
+│   └── banner_show.py               # CLI banner display
 │
 ├── config/
-│   ├── config.ini.example      # Main app config template
-│   ├── bot_config.ini.example  # Telegram bot config template
-│   ├── email_config.ini.example# Email SMTP config template
-│   └── db_config.ini.example   # MySQL backup config template
+│   ├── config.ini.example           # Main app config template
+│   ├── bot_config.ini.example       # Telegram bot config template
+│   ├── email_config.ini.example     # Email SMTP config template
+│   └── db_config.ini.example        # MySQL backup config template
 │
 ├── scripts/
-│   └── setup.sh                # Setup helper script
+│   ├── setup.sh                     # Setup helper (venv, deps, config copies)
+│   ├── install_service.sh           # Auto-detect OS and install startup service
+│   ├── backup-handler.service       # systemd unit file (Linux)
+│   ├── com.backup-handler.plist     # launchd plist (macOS)
+│   └── install_windows_task.ps1     # Windows Task Scheduler registration
 │
-└── Logs/                       # Log output directory (auto-created)
+└── Logs/                            # Log output directory (auto-created)
 ```
 
 ---
@@ -141,7 +148,7 @@ backup_handler/
 ## Requirements
 
 - **Python** 3.8+
-- **OS**: Linux (tested on Ubuntu/Debian)
+- **OS**: Linux, macOS, or Windows
 
 ### Python Dependencies
 
@@ -167,11 +174,12 @@ All dependencies are pinned in `requirements.txt`:
 git clone https://github.com/SP1R4/BackupHandler.git
 cd BackupHandler
 
-# Create and activate virtual environment
+# Run the setup script (creates venv, installs deps, copies config templates)
+bash scripts/setup.sh
+
+# Or manually:
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -181,9 +189,9 @@ Copy the example config files and fill in your values:
 
 ```bash
 cp config/config.ini.example config/config.ini
-cp config/bot_config.ini.example config/bot_config.ini
-cp config/email_config.ini.example config/email_config.ini
-cp config/db_config.ini.example config/db_config.ini
+cp config/bot_config.ini.example config/bot_config.ini       # Only if using Telegram
+cp config/email_config.ini.example config/email_config.ini   # Only if using email
+cp config/db_config.ini.example config/db_config.ini         # Only if using MySQL backup
 ```
 
 > **Important:** The real `.ini` files are gitignored to prevent accidental secret exposure.
@@ -194,52 +202,47 @@ cp config/db_config.ini.example config/db_config.ini
 
 ### `config/config.ini` — Main Application Config
 
-```ini
-[DEFAULT]
-source_dir = /path/to/source       # Directory to back up
-mode = full                         # Backup mode: full | incremental | differential
-compress_type = zip                 # Compression: none | zip | zip_pw
-
-[BACKUPS]
-backup_dirs = /backup1, /backup2   # Comma-separated backup destinations
-
-[SSH]
-ssh_servers = server1.com, server2.com
-username = ssh_user
-password = ssh_password
-
-[SCHEDULE]
-times = 03:00, 12:00               # HH:MM format, comma-separated
-interval_minutes = 60               # Check interval for scheduler
-
-[MODES]
-local = True                        # Enable local backups
-ssh = False                         # Enable SSH/SFTP backups
-
-[NOTIFICATIONS]
-bot = True                          # Enable Telegram notifications
-receiver_emails = None              # Comma-separated emails, or None
-```
+| Section | Field | Required | Description |
+|---------|-------|----------|-------------|
+| `[DEFAULT]` | `source_dir` | **Yes** | Absolute path to the directory to back up |
+| `[DEFAULT]` | `mode` | **Yes** | Backup mode: `full`, `incremental`, or `differential` |
+| `[DEFAULT]` | `compress_type` | No | Compression: `none`, `zip`, or `zip_pw` (default: `none`) |
+| `[BACKUPS]` | `backup_dirs` | **Yes** | Comma-separated backup destination directories |
+| `[SSH]` | `ssh_servers` | When ssh=True | Comma-separated SSH server hostnames |
+| `[SSH]` | `username` | When ssh=True | SSH username |
+| `[SSH]` | `password` | When ssh=True | SSH password |
+| `[SCHEDULE]` | `times` | For `--scheduled` | Comma-separated times in HH:MM format |
+| `[SCHEDULE]` | `interval_minutes` | No | Scheduler check interval in minutes (default: 60) |
+| `[MODES]` | `local` | **Yes** | Enable local backups: `True` / `False` |
+| `[MODES]` | `ssh` | **Yes** | Enable SSH backups: `True` / `False` |
+| `[NOTIFICATIONS]` | `bot` | No | Enable Telegram notifications: `True` / `False` |
+| `[NOTIFICATIONS]` | `receiver_emails` | No | Comma-separated emails, or `None` to disable |
 
 ### `config/bot_config.ini` — Telegram Bot
 
-```ini
-[TELEGRAM]
-api_token = YOUR_BOT_TOKEN
-
-[USERS]
-interacted_users = YOUR_CHAT_ID
-```
+| Section | Field | Required | Description |
+|---------|-------|----------|-------------|
+| `[TELEGRAM]` | `api_token` | **Yes** | Bot API token from @BotFather |
+| `[USERS]` | `interacted_users` | **Yes** | Comma-separated Telegram user/chat IDs |
 
 ### `config/email_config.ini` — Email (SMTP)
 
-```ini
-[EMAIL]
-sender_email = you@gmail.com
-app_password = YOUR_APP_PASSWORD
-smtp_host = smtp.gmail.com          # Configurable SMTP host
-smtp_port = 465                     # Configurable SMTP port
-```
+| Section | Field | Required | Description |
+|---------|-------|----------|-------------|
+| `[EMAIL]` | `sender_email` | **Yes** | Sender email address |
+| `[EMAIL]` | `app_password` | **Yes** | App-specific password (not your regular password) |
+| `[EMAIL]` | `smtp_host` | No | SMTP server hostname (default: `smtp.gmail.com`) |
+| `[EMAIL]` | `smtp_port` | No | SMTP port (default: `465`) |
+
+### `config/db_config.ini` — MySQL Backup
+
+| Section | Field | Required | Description |
+|---------|-------|----------|-------------|
+| `[mysql]` | `user` | **Yes** | MySQL username |
+| `[mysql]` | `password` | **Yes** | MySQL password |
+| `[mysql]` | `database` | **Yes** | Database name |
+| `[backup]` | `local_backup_dir` | **Yes** | Local directory for dumps |
+| `[ssh]` | `host`, `port`, `user`, `password`, `remote_backup_dir` | **Yes** | Remote transfer settings |
 
 ---
 
@@ -328,6 +331,58 @@ Full ─────────────────────────
 
 ---
 
+## Running as a Startup Service
+
+Backup Handler can run as a system service so backups start automatically on boot.
+
+### Linux (systemd)
+
+```bash
+# Automatic installation
+bash scripts/install_service.sh
+
+# Or manually:
+# 1. Edit scripts/backup-handler.service — replace __PROJECT_DIR__ and __USER__
+# 2. Copy and enable:
+sudo cp scripts/backup-handler.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable backup-handler
+sudo systemctl start backup-handler
+
+# Check status
+sudo systemctl status backup-handler
+sudo journalctl -u backup-handler -f
+```
+
+### macOS (launchd)
+
+```bash
+# Automatic installation
+bash scripts/install_service.sh
+
+# Or manually:
+# 1. Edit scripts/com.backup-handler.plist — replace __PROJECT_DIR__
+# 2. Copy and load:
+cp scripts/com.backup-handler.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.backup-handler.plist
+
+# Check status
+launchctl list | grep backup-handler
+```
+
+### Windows (Task Scheduler)
+
+```powershell
+# Run in PowerShell as Administrator
+.\scripts\install_windows_task.ps1
+
+# Check status
+Get-ScheduledTask -TaskName "BackupHandler"
+Start-ScheduledTask -TaskName "BackupHandler"
+```
+
+---
+
 ## Notifications
 
 ### Telegram Bot
@@ -358,6 +413,7 @@ This project follows security best practices:
 | **MySQL password handling** | Passed via `MYSQL_PWD` environment variable, never on command line |
 | **Config file protection** | All `.ini` files with secrets are gitignored; `.example` templates provided |
 | **No OTP file leakage** | Generated OTPs returned in memory only, never written to `otp.json` |
+| **Config validation** | Fail-fast on startup with clear error messages; no silent fallbacks to None |
 
 ---
 
@@ -370,6 +426,7 @@ Logs are written to `Logs/application.log` with automatic rotation:
 - **Log levels:** Configurable (default: `DEBUG`)
 
 ```
+2026-02-22 12:00:01 - INFO - Configuration loaded successfully from config/config.ini
 2026-02-22 12:00:01 - INFO - Performing full backup from /data
 2026-02-22 12:00:01 - INFO - Successfully backed up /data/file.txt to /backups/file.txt
 2026-02-22 12:00:02 - INFO - Compressed directory '/data' to 'backup_20260222_120002.zip'
@@ -382,12 +439,17 @@ Logs are written to `Logs/application.log` with automatic rotation:
 
 | Issue | Solution |
 |-------|----------|
+| `Config error: 'source_dir' is not set` | Set `source_dir` in `[DEFAULT]` section of `config/config.ini` |
+| `Config error: 'ssh_servers' is not set` | Set SSH fields in `[SSH]` section, or set `ssh = False` in `[MODES]` |
+| `Config error: Invalid time format` | Use HH:MM 24-hour format (e.g., `03:00`, `14:30`) |
+| `Error: config/bot_config.ini not found` | Copy `config/bot_config.ini.example` to `config/bot_config.ini` and fill in your bot token |
+| `Error: Missing key in bot_config.ini` | Ensure `[TELEGRAM] api_token` and `[USERS] interacted_users` are set |
+| `Config error: 'sender_email' is not set` | Fill in `sender_email` and `app_password` in `config/email_config.ini` |
 | `ModuleNotFoundError` | Ensure venv is activated and `pip install -r requirements.txt` was run |
-| Telegram notifications not sending | Verify bot token and chat ID in `config/bot_config.ini`. Send a message to the bot first to register |
-| SSH connection refused | Check server address, port, and credentials. Verify the remote host key is in `~/.ssh/known_hosts` |
-| `FileNotFoundError` for config | Copy `.example` files to `.ini` — see [Installation](#installation) |
-| Scheduled backup not triggering | Ensure schedule times in config match `HH:MM` format and the process is running continuously |
-| Compression fails | Ensure `pyminizip` is installed. For password-protected ZIPs, verify the source directory is not empty |
+| Telegram notifications not sending | Verify bot token and chat ID. Send a message to the bot first to register |
+| SSH connection refused | Check server address, port, and credentials. Verify the remote host key |
+| Scheduled backup not triggering | Ensure schedule times in config match HH:MM format and the process is running |
+| Compression fails | Ensure `pyminizip` is installed. For `zip_pw`, verify the source directory is not empty |
 
 ---
 

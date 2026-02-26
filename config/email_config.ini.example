@@ -1,5 +1,10 @@
 [EMAIL]
+# REQUIRED: Sender email address (e.g., your Gmail address)
 sender_email = your_email@gmail.com
+# REQUIRED: App-specific password (NOT your regular email password)
+# For Gmail: https://myaccount.google.com/apppasswords
 app_password = YOUR_APP_PASSWORD
+# OPTIONAL: SMTP server hostname (default: smtp.gmail.com)
 smtp_host = smtp.gmail.com
+# OPTIONAL: SMTP server port (default: 465 for SSL)
 smtp_port = 465

@@ -1,24 +1,37 @@
 [DEFAULT]
+# REQUIRED: Absolute path to the directory you want to back up
 source_dir = /path/to/source
+# REQUIRED: Backup strategy — full | incremental | differential
 mode = full
+# OPTIONAL: Compression type — none | zip | zip_pw (password-protected)
 compress_type = zip
 
 [BACKUPS]
+# REQUIRED: Comma-separated list of local backup destination directories
 backup_dirs = /path/to/backup1, /path/to/backup2
 
 [SSH]
+# OPTIONAL: Comma-separated SSH server hostnames (required if ssh mode is True)
 ssh_servers = None
+# OPTIONAL: SSH username (required if ssh mode is True)
 username = None
+# OPTIONAL: SSH password (required if ssh mode is True)
 password = None
 
 [SCHEDULE]
+# REQUIRED (for --scheduled mode): Comma-separated times in HH:MM (24-hour) format
 times = 03:00, 12:00
+# OPTIONAL: How often (in minutes) the scheduler checks for matching times
 interval_minutes = 60
 
 [MODES]
+# REQUIRED: Enable local backups (True/False)
 local = True
+# REQUIRED: Enable SSH/SFTP backups (True/False)
 ssh = False
 
 [NOTIFICATIONS]
+# OPTIONAL: Enable Telegram bot notifications (True/False)
 bot = True
+# OPTIONAL: Comma-separated email addresses for notifications, or None to disable
 receiver_emails = None

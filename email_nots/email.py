@@ -1,18 +1,44 @@
 import os
 import smtplib
 import configparser
+from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 
 
+_EMAIL_CONFIG_PATH = Path(__file__).parent.parent / 'config' / 'email_config.ini'
+
+
 def _load_email_config():
+    config_path = _EMAIL_CONFIG_PATH
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Email config not found at '{config_path}'. "
+            "Copy config/email_config.ini.example to config/email_config.ini and fill in your values."
+        )
+
     config = configparser.ConfigParser()
-    config.read('config/email_config.ini')
-    sender_email = config['EMAIL']['sender_email']
-    app_password = config['EMAIL']['app_password']
-    smtp_host = config['EMAIL'].get('smtp_host', 'smtp.gmail.com')
-    smtp_port = config['EMAIL'].getint('smtp_port', 465)
+    config.read(str(config_path))
+
+    if 'EMAIL' not in config:
+        raise KeyError("Missing [EMAIL] section in config/email_config.ini")
+
+    email_section = config['EMAIL']
+
+    # Required fields
+    sender_email = email_section.get('sender_email', '').strip()
+    app_password = email_section.get('app_password', '').strip()
+
+    if not sender_email or sender_email == 'your_email@gmail.com':
+        raise ValueError("Config error: 'sender_email' is not set in config/email_config.ini [EMAIL]")
+    if not app_password or app_password == 'YOUR_APP_PASSWORD':
+        raise ValueError("Config error: 'app_password' is not set in config/email_config.ini [EMAIL]")
+
+    # Optional fields with defaults
+    smtp_host = email_section.get('smtp_host', 'smtp.gmail.com').strip()
+    smtp_port = email_section.getint('smtp_port', 465)
+
     return sender_email, app_password, smtp_host, smtp_port
 
 def send_email(receiver_emails, subject, body, attachment_paths=None, logger=None):
@@ -25,8 +51,6 @@ def send_email(receiver_emails, subject, body, attachment_paths=None, logger=Non
     - body (str): Body text of the email.
     - attachment_paths (list of str, optional): List of file paths to attach to the email.
     - logger (logging.Logger, optional): Logger object for logging (default: None).
-
-    This function creates and sends an email using SMTP with optional file attachments and logs key events.
     """
     try:
         sender_email, app_password, smtp_host, smtp_port = _load_email_config()
@@ -60,13 +84,6 @@ def send_email(receiver_emails, subject, body, attachment_paths=None, logger=Non
 def attach_files_to_email(message, attachment_paths, logger=None):
     """
     Attach files to the email message with a fallback for unsupported file types.
-
-    Parameters:
-    - message (MIMEMultipart): The email message object to which attachments will be added.
-    - attachment_paths (list of str): List of file paths to attach to the email.
-    - logger (logging.Logger, optional): Logger object for logging (default: None).
-
-    This function attaches files from the provided paths to the email message and logs the process.
     """
     file_type_map = {
         'pdf': 'application',
@@ -111,22 +128,10 @@ def attach_files_to_email(message, attachment_paths, logger=None):
                 print(error_message)
 
 
-
 def send_via_smtp(sender_email, app_password, receiver_emails, message, logger=None,
                   smtp_host='smtp.gmail.com', smtp_port=465):
     """
     Send the email via SMTP.
-
-    Parameters:
-    - sender_email (str): Sender's email address.
-    - app_password (str): App-specific password for authentication.
-    - receiver_emails (list of str): List of recipient email addresses.
-    - message (MIMEMultipart): The email message to send.
-    - logger (logging.Logger, optional): Logger object for logging (default: None).
-    - smtp_host (str): SMTP server hostname (default: smtp.gmail.com).
-    - smtp_port (int): SMTP server port (default: 465).
-
-    This function handles the SMTP connection and sends the email.
     """
     try:
         with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
@@ -142,5 +147,3 @@ def send_via_smtp(sender_email, app_password, receiver_emails, message, logger=N
             logger.error(error_message)
         else:
             print(error_message)
-
-

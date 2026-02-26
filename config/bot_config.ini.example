@@ -1,5 +1,7 @@
 [TELEGRAM]
+# REQUIRED: Your Telegram bot API token from @BotFather
 api_token = YOUR_TELEGRAM_BOT_API_TOKEN
 
 [USERS]
+# REQUIRED: Comma-separated Telegram user/chat IDs to receive notifications
 interacted_users = YOUR_USER_ID

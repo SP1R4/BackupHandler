@@ -45,7 +45,18 @@ def main():
     validate_args(args, logger)
 
     # Initialize TelegramBot if --notifications flag is used
-    telegram_bot = TelegramBot(logger) if args.notifications else None
+    telegram_bot = None
+    if args.notifications:
+        try:
+            telegram_bot = TelegramBot(logger)
+        except FileNotFoundError:
+            logger.error("Telegram bot config not found. Create config/bot_config.ini from config/bot_config.ini.example")
+            print("Error: config/bot_config.ini not found. Copy config/bot_config.ini.example and fill in your values.", file=sys.stderr)
+            sys.exit(1)
+        except KeyError as e:
+            logger.error(f"Missing key in bot_config.ini: {e}. Check that [TELEGRAM] api_token and [USERS] interacted_users are set.")
+            print(f"Error: Missing key in config/bot_config.ini: {e}. Ensure api_token and interacted_users are set.", file=sys.stderr)
+            sys.exit(1)
 
     # Use the provided receiver emails if notifications are enabled
     receiver_emails = args.receiver if args.notifications else None
@@ -73,8 +84,8 @@ def main():
 
 def scheduled_operation(logger, config_file, telegram_bot=None):
     try:
-        # Loading the config file
-        config_values = extract_config_values(logger, config_file)
+        # Loading the config file (with schedule validation)
+        config_values = extract_config_values(logger, config_file, require_schedule=True)
 
         # Access the schedule times and interval
         times = config_values.get('schedule_times', [])

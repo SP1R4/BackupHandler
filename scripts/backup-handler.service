@@ -1,0 +1,16 @@
+[Unit]
+Description=Backup Handler - Scheduled Backup Service
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/main.py --scheduled
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
