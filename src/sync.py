@@ -7,7 +7,7 @@ from pathlib import Path
 from retrying import retry
 from email_nots.email import send_email
 from .compression import compress_directory
-from .utils import verify_backup, generate_otp
+from .utils import verify_backup, generate_otp, handle_symlink
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -38,6 +38,12 @@ def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=No
                 try:
                     # Ensure the destination directory exists
                     backup_file.parent.mkdir(parents=True, exist_ok=True)
+
+                    # Handle symlinks separately
+                    if file.is_symlink():
+                        handle_symlink(logger, str(file), str(backup_file))
+                        continue
+
                     shutil.copy2(file, backup_file)
                     if verify_backup(file, backup_file):
                         logger.info(f"Successfully backed up {file} to {backup_file}") if logger else print(f"Successfully backed up {file} to {backup_file}")
@@ -93,7 +99,7 @@ def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=No
         remote_dir = f"{remote_path}/{relative.parent}"
 
         # Ensure remote directory exists
-        _sftp_mkdirs(sftp, remote_dir)
+        _sftp_mkdirs(sftp, remote_dir, logger=logger)
 
         should_upload = True
         if mode in ('incremental', 'differential'):
@@ -124,7 +130,7 @@ def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=No
         _sftp_cleanup_extra_files(sftp, local_path, remote_path, logger)
 
 
-def _sftp_mkdirs(sftp, remote_dir):
+def _sftp_mkdirs(sftp, remote_dir, logger=None):
     """Recursively create remote directories."""
     dirs_to_create = []
     current = remote_dir
@@ -138,8 +144,14 @@ def _sftp_mkdirs(sftp, remote_dir):
     for d in reversed(dirs_to_create):
         try:
             sftp.mkdir(d)
-        except OSError:
-            pass  # Directory may already exist
+        except IOError as e:
+            # Ignore "already exists" (errno 13 on some SFTP servers), raise others
+            try:
+                sftp.stat(d)
+            except FileNotFoundError:
+                if logger:
+                    logger.error(f"Failed to create remote directory '{d}': {e}")
+                raise
 
 
 def _sftp_cleanup_extra_files(sftp, local_path, remote_path, logger=None):
@@ -285,20 +297,33 @@ def perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time
     logger.info(f"Performing incremental backup from {source_dir} since last backup time: {last_backup_time}")
     files = list(Path(source_dir).rglob('*'))
 
+    failed_count = 0
     for file in tqdm(files, desc="Syncing Incremental Files", unit="files"):
+        if file.is_dir():
+            continue
         file_mtime = os.path.getmtime(file)
         for backup_dir in backup_dirs:
             backup_file = Path(backup_dir) / file.relative_to(source_dir)
             if file_mtime > last_backup_time or not backup_file.exists():
-                logger.info(f"Backing up modified or new file: {file} (modified at {file_mtime})")
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file, backup_file)
-                if verify_backup(file, backup_file):
-                    logger.info(f"Incremental backup of {file} to {backup_file}")
-                else:
-                    logger.error(f"Checksum verification failed for {file}")
+                try:
+                    logger.info(f"Backing up modified or new file: {file} (modified at {file_mtime})")
+                    backup_file.parent.mkdir(parents=True, exist_ok=True)
+                    if file.is_symlink():
+                        handle_symlink(logger, str(file), str(backup_file))
+                        continue
+                    shutil.copy2(file, backup_file)
+                    if verify_backup(file, backup_file):
+                        logger.info(f"Incremental backup of {file} to {backup_file}")
+                    else:
+                        logger.error(f"Checksum verification failed for {file}")
+                        failed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to backup {file} to {backup_file}: {e}")
+                    failed_count += 1
             else:
                 logger.info(f"Skipping unmodified file: {file} (modified at {file_mtime})")
+    if failed_count:
+        logger.warning(f"Incremental backup completed with {failed_count} file error(s).")
 
     if bot:
         bot.send_notification(f"Completed incremental backup from {source_dir}")
@@ -313,16 +338,29 @@ def perform_differential_backup(logger, source_dir, backup_dirs, last_full_backu
     """
     logger.info(f"Performing differential backup from {source_dir}")
     files = list(Path(source_dir).rglob('*'))
+    failed_count = 0
     for file in tqdm(files, desc="Syncing Differential Files", unit="files"):
+        if file.is_dir():
+            continue
         if os.path.getmtime(file) > last_full_backup_time:
             for backup_dir in backup_dirs:
                 backup_file = Path(backup_dir) / file.relative_to(source_dir)
-                backup_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file, backup_file)
-                if verify_backup(file, backup_file):
-                    logger.info(f"Differential backup of {file} to {backup_file}")
-                else:
-                    logger.error(f"Checksum verification failed for {file}")
+                try:
+                    backup_file.parent.mkdir(parents=True, exist_ok=True)
+                    if file.is_symlink():
+                        handle_symlink(logger, str(file), str(backup_file))
+                        continue
+                    shutil.copy2(file, backup_file)
+                    if verify_backup(file, backup_file):
+                        logger.info(f"Differential backup of {file} to {backup_file}")
+                    else:
+                        logger.error(f"Checksum verification failed for {file}")
+                        failed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to backup {file} to {backup_file}: {e}")
+                    failed_count += 1
+    if failed_count:
+        logger.warning(f"Differential backup completed with {failed_count} file error(s).")
 
     if bot:
         bot.send_notification(f"Completed differential backup from {source_dir}")

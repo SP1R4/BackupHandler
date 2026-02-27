@@ -10,13 +10,15 @@ from email.mime.application import MIMEApplication
 
 _EMAIL_CONFIG_PATH = Path(__file__).parent.parent / 'config' / 'email_config.ini'
 
-# Cached email config (loaded once per process)
+# Cached email config with TTL (reloads after 5 minutes for long-running scheduled processes)
 _cached_email_config = None
+_cache_timestamp = 0.0
+_CACHE_TTL = 300  # seconds
 
 
 def _load_email_config():
-    global _cached_email_config
-    if _cached_email_config is not None:
+    global _cached_email_config, _cache_timestamp
+    if _cached_email_config is not None and (time.time() - _cache_timestamp) < _CACHE_TTL:
         return _cached_email_config
 
     config_path = _EMAIL_CONFIG_PATH
@@ -48,6 +50,7 @@ def _load_email_config():
     smtp_port = email_section.getint('smtp_port', 465)
 
     _cached_email_config = (sender_email, app_password, smtp_host, smtp_port)
+    _cache_timestamp = time.time()
     return _cached_email_config
 
 def send_email(receiver_emails, subject, body, attachment_paths=None, logger=None):

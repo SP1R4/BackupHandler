@@ -1,5 +1,6 @@
 import sys
 import configparser
+from pathlib import Path
 from src.utils import is_valid_email
 
 
@@ -61,6 +62,11 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             'bot': config.getboolean('NOTIFICATIONS', 'bot', fallback=False),
             'receiver_emails': None,
         }
+
+        # Resolve relative paths to absolute
+        if config_vars['source_dir']:
+            config_vars['source_dir'] = str(Path(config_vars['source_dir']).resolve())
+        config_vars['backup_dirs'] = [str(Path(d).resolve()) for d in config_vars['backup_dirs']]
 
         # Parse receiver emails
         if raw_receiver_emails:

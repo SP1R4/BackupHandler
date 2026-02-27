@@ -192,6 +192,25 @@ def scheduled_operation(logger, config_file, telegram_bot=None):
         logger.error(f"Error in scheduled_operation: {e}")
         sys.exit(1)
 
+def _notify(logger, telegram_bot, notifications, message):
+    """Send a Telegram notification if bot is available and notifications are enabled."""
+    if notifications and telegram_bot:
+        try:
+            telegram_bot.send_notification(message)
+        except Exception as e:
+            logger.error(f"Failed to send Telegram notification: {e}")
+
+
+def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn):
+    """Run a backup function with standard notification and error handling."""
+    try:
+        backup_fn()
+        _notify(logger, telegram_bot, notifications, f"Local {mode_name} backup completed.")
+    except Exception as e:
+        logger.error(f"{mode_name.capitalize()} backup failed: {e}")
+        _notify(logger, telegram_bot, notifications, f"{mode_name.capitalize()} backup failed.")
+
+
 def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None,
                      operation_modes=None, backup_mode=None, compress=None,
                      receiver=None, show_setup=False, notifications=False,
@@ -207,11 +226,13 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
     if operation_modes is None:
         operation_modes = []
     if 'local' in operation_modes:
-        if dry_run:
+        if not backup_dirs:
+            logger.warning("Local mode selected but no backup directories specified. Skipping local backup.")
+        elif dry_run:
             logger.info(f"[DRY RUN] Would perform {backup_mode or 'full'} backup: '{source_dir}' -> {backup_dirs}")
             print(f"[DRY RUN] Would perform {backup_mode or 'full'} backup")
             print(f"  Source:      {source_dir}")
-            print(f"  Destinations: {', '.join(backup_dirs) if backup_dirs else 'None'}")
+            print(f"  Destinations: {', '.join(backup_dirs)}")
             if compress:
                 print(f"  Compression: {compress}")
         elif backup_mode == 'incremental':
@@ -219,57 +240,43 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 logger.error("Invalid option for incremental backup.")
                 sys.exit(1)
             last_backup_time = get_last_backup_time()
-            try:
-                perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time, bot=telegram_bot)
-                if notifications:
-                    telegram_bot.send_notification(f"Local incremental backup completed.")
-            except Exception as e:
-                logger.error(f"Incremental backup failed: {e}")
-                if notifications:
-                    telegram_bot.send_notification("Incremental backup failed.")
+            _run_backup(logger, telegram_bot, notifications, "incremental",
+                        lambda: perform_incremental_backup(logger, source_dir, backup_dirs,
+                                                           last_backup_time, bot=telegram_bot,
+                                                           receiver_emails=receiver))
         elif backup_mode == 'differential':
             if compress:
                 logger.error("Invalid option for differential backup.")
                 sys.exit(1)
             last_full_backup_time = get_last_full_backup_time()
-            try:
-                perform_differential_backup(logger, source_dir, backup_dirs, last_full_backup_time)
-                if notifications:
-                    telegram_bot.send_notification(f"Local differential backup completed.")
-            except Exception as e:
-                logger.error(f"Differential backup failed: {e}")
-                if notifications:
-                    telegram_bot.send_notification("Differential backup failed.")
+            _run_backup(logger, telegram_bot, notifications, "differential",
+                        lambda: perform_differential_backup(logger, source_dir, backup_dirs,
+                                                            last_full_backup_time, bot=telegram_bot,
+                                                            receiver_emails=receiver))
         else:
-            if notifications:
-                telegram_bot.send_notification("Starting full backup...")
-            try:
-                perform_full_backup(logger, source_dir, backup_dirs, compress=compress, bot=telegram_bot, receiver_emails=receiver)
-                update_last_full_backup_time()
-                if notifications:
-                    telegram_bot.send_notification(f"Local full backup completed.")
-            except Exception as e:
-                logger.error(f"Full backup failed: {e}")
-                if notifications:
-                    telegram_bot.send_notification("Full backup failed.")
+            _notify(logger, telegram_bot, notifications, "Starting full backup...")
+            _run_backup(logger, telegram_bot, notifications, "full",
+                        lambda: perform_full_backup(logger, source_dir, backup_dirs,
+                                                     compress=compress, bot=telegram_bot,
+                                                     receiver_emails=receiver))
+            update_last_full_backup_time()
 
     if operation_modes and ('ssh' in operation_modes):
-        if dry_run:
+        if not ssh_servers:
+            logger.warning("SSH mode selected but no SSH servers specified. Skipping SSH backup.")
+        elif dry_run:
             logger.info(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {ssh_servers}")
-            print(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {', '.join(ssh_servers or [])}")
+            print(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {', '.join(ssh_servers)}")
         else:
-            if notifications:
-                telegram_bot.send_notification("Starting SSH backup...")
+            _notify(logger, telegram_bot, notifications, "Starting SSH backup...")
             logger.info("Running SSH backup...")
             try:
                 sync_ssh_servers_concurrently(source_dir, ssh_servers, username=ssh_username or '',
                                               password=ssh_password, logger=logger)
-                if notifications:
-                    telegram_bot.send_notification("SSH backup completed.")
+                _notify(logger, telegram_bot, notifications, "SSH backup completed.")
             except Exception as e:
                 logger.error(f"SSH backup failed: {e}")
-                if notifications:
-                    telegram_bot.send_notification("SSH backup failed.")
+                _notify(logger, telegram_bot, notifications, "SSH backup failed.")
 
     if dry_run:
         logger.info("[DRY RUN] Complete. No files were modified.")
@@ -279,8 +286,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
     # Update the backup timestamp after successful execution
     update_last_backup_time()
 
-    if notifications:
-        telegram_bot.send_notification("All backup operations completed successfully.")
+    _notify(logger, telegram_bot, notifications, "All backup operations completed successfully.")
 
 if __name__ == "__main__":
     main()
