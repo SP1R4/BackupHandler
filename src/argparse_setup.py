@@ -13,6 +13,13 @@ def setup_argparse():
     parser = argparse.ArgumentParser(
         description="Backup Handler Script for managing backups and notifications."
     )
+
+    # Version
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='backup-handler 1.4.0'
+    )
     
     # Configuration file argument
     parser.add_argument(
@@ -33,8 +40,8 @@ def setup_argparse():
     
     # Directory and server overrides
     parser.add_argument(
-        '--source-dir', 
-        nargs='+', 
+        '--source-dir',
+        type=str,
         help='Override the source directory from the configuration'
     )
     parser.add_argument( 
@@ -105,7 +112,13 @@ def setup_argparse():
 
     return args
 
-def validate_args(args, logger):    
+def validate_args(args, logger):
+    # --scheduled and --dry-run don't make sense together
+    if args.scheduled and args.dry_run:
+        logger.error("--scheduled and --dry-run cannot be used together. "
+                      "Dry-run is for one-off previews, not scheduled execution.")
+        sys.exit(1)
+
     # Check if --backup-mode is specified without source and backup directories
     if args.backup_mode and (not args.source_dir or not args.backup_dirs):
         logger.error("Source directory and backup directories must be specified when using --backup-mode.")
