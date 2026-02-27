@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-1.4.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.5.0-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
@@ -56,8 +56,9 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Scheduling** | Built-in scheduler with configurable times and tolerance-based matching |
 | **Notifications** | Real-time alerts via Telegram bot and/or email with configurable SMTP and retry |
 | **Integrity** | SHA-256 checksum verification on every copied file |
+| **Symlink Support** | Symbolic links preserved as links during backup (not dereferenced) |
 | **Security** | No plaintext secrets on disk, passwords delivered via in-memory buffers, secure SSH policies |
-| **Config Validation** | Fail-fast validation with clear error messages pointing to exact config fields |
+| **Config Validation** | Fail-fast validation with clear error messages; relative paths auto-resolved to absolute |
 | **Startup Service** | Cross-platform service installation (systemd, launchd, Task Scheduler) |
 | **MySQL Backup** | Database dump with SFTP transfer to remote servers (separate module) |
 
@@ -419,7 +420,9 @@ This project follows security best practices:
 | **No OTP file leakage** | Generated OTPs returned in memory only, never written to `otp.json` |
 | **Config file permissions** | Setup script sets `chmod 600` on all `.ini` files containing credentials |
 | **Config validation** | Fail-fast on startup with clear error messages; no silent fallbacks to None |
+| **Path resolution** | Relative paths in config automatically resolved to absolute to prevent working-directory issues |
 | **Instance locking** | PID lock file prevents duplicate scheduled instances from running simultaneously |
+| **Fault tolerance** | Per-file error handling in incremental/differential backups — single file failures don't stop the job |
 
 ---
 

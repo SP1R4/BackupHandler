@@ -18,7 +18,7 @@ def setup_argparse():
     parser.add_argument(
         '--version',
         action='version',
-        version='backup-handler 1.4.0'
+        version='backup-handler 1.5.0'
     )
     
     # Configuration file argument
