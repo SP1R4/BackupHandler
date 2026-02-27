@@ -112,11 +112,20 @@ def validate_config(logger, config, require_schedule=False):
     if not normalize_none(config.get('DEFAULT', 'source_dir', fallback=None)):
         errors.append("Config error: 'source_dir' is not set in [DEFAULT]. Set it in config/config.ini")
 
-    if not normalize_none(config.get('DEFAULT', 'mode', fallback=None)):
+    mode = normalize_none(config.get('DEFAULT', 'mode', fallback=None))
+    if not mode:
         errors.append("Config error: 'mode' is not set in [DEFAULT]. Set it in config/config.ini")
+    elif mode not in ('full', 'incremental', 'differential'):
+        errors.append(f"Config error: 'mode' in [DEFAULT] must be full, incremental, or differential, got '{mode}'")
 
     if not config.get('BACKUPS', 'backup_dirs', fallback='').strip():
         errors.append("Config error: 'backup_dirs' is not set in [BACKUPS]. Set it in config/config.ini")
+
+    # Validate compress_type if set
+    compress_type = normalize_none(config.get('DEFAULT', 'compress_type', fallback=None))
+    valid_compress = ('none', 'zip', 'zip_pw')
+    if compress_type and compress_type not in valid_compress:
+        errors.append(f"Config error: 'compress_type' in [DEFAULT] must be one of {valid_compress}, got '{compress_type}'")
 
     # Validate SSH fields only when MODES.ssh = True
     ssh_enabled = False

@@ -74,6 +74,11 @@ def send_email(receiver_emails, subject, body, attachment_paths=None, logger=Non
         send_via_smtp(sender_email, app_password, receiver_emails, message, logger,
                       smtp_host=smtp_host, smtp_port=smtp_port)
 
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        # Config errors should propagate so callers know email is misconfigured
+        if logger:
+            logger.error(f"Email configuration error: {e}")
+        raise
     except Exception as e:
         error_message = f"Failed to send email: {e}"
         if logger:

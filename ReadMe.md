@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-1.2.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.0-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
@@ -163,7 +163,6 @@ All dependencies are pinned in `requirements.txt`:
 | `pyTelegramBotAPI` | Telegram notifications |
 | `colorama` | Colored terminal output |
 | `retrying` | Retry logic for SSH |
-| `schedule` | Task scheduling |
 
 ---
 
@@ -280,6 +279,10 @@ python main.py --operation-modes local ssh --backup-mode full \
 # Scheduled mode (reads times from config, runs continuously)
 python main.py --scheduled
 
+# Dry run — preview what would happen without copying anything
+python main.py --dry-run --operation-modes local ssh --backup-mode full \
+  --source-dir /data --backup-dirs /backups --ssh-servers server1.com
+
 # Show current configuration
 python main.py --show-setup
 ```
@@ -298,6 +301,7 @@ python main.py --show-setup
 | `--scheduled` | Run in scheduled mode using config times |
 | `--notifications` | Enable Telegram & email notifications |
 | `--receiver EMAIL [EMAIL ...]` | Email recipients for notifications |
+| `--dry-run` | Preview what would be done without copying or syncing files |
 | `--show-setup` | Display current configuration and exit |
 
 ---
@@ -413,7 +417,9 @@ This project follows security best practices:
 | **MySQL password handling** | Passed via `MYSQL_PWD` environment variable, never on command line |
 | **Config file protection** | All `.ini` files with secrets are gitignored; `.example` templates provided |
 | **No OTP file leakage** | Generated OTPs returned in memory only, never written to `otp.json` |
+| **Config file permissions** | Setup script sets `chmod 600` on all `.ini` files containing credentials |
 | **Config validation** | Fail-fast on startup with clear error messages; no silent fallbacks to None |
+| **Instance locking** | PID lock file prevents duplicate scheduled instances from running simultaneously |
 
 ---
 
@@ -449,6 +455,9 @@ Logs are written to `Logs/application.log` with automatic rotation:
 | Telegram notifications not sending | Verify bot token and chat ID. Send a message to the bot first to register |
 | SSH connection refused | Check server address, port, and credentials. Verify the remote host key |
 | Scheduled backup not triggering | Ensure schedule times in config match HH:MM format and the process is running |
+| `Config error: 'compress_type' must be one of...` | Use `none`, `zip`, or `zip_pw` in `[DEFAULT] compress_type` |
+| `Config error: 'mode' must be full, incremental...` | Use `full`, `incremental`, or `differential` in `[DEFAULT] mode` |
+| `Another backup-handler instance is already running` | A scheduled instance is already active. Kill it first, or remove `.backup-handler.lock` if stale |
 | Compression fails | Ensure `pyminizip` is installed. For `zip_pw`, verify the source directory is not empty |
 
 ---

@@ -71,9 +71,16 @@ def setup_argparse():
     
     # Scheduling options
     parser.add_argument(
-        '--scheduled', 
-        action='store_true', 
+        '--scheduled',
+        action='store_true',
         help='Execute the backup as a scheduled task'
+    )
+
+    # Dry run option
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show what would be done without actually copying or syncing any files'
     )
 
     # Notifications option

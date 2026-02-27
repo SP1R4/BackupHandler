@@ -12,4 +12,6 @@ config/bot_config.ini
 config/email_config.ini
 config/db_config.ini
 config/config.ini
+config/.bot_users.json
+.backup-handler.lock
 .claude/
