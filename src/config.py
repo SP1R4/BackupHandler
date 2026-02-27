@@ -16,7 +16,8 @@ def normalize_none(value):
     return stripped
 
 
-def extract_config_values(logger, config_file_path, show=False, require_schedule=False):
+def extract_config_values(logger, config_file_path, show=False, require_schedule=False,
+                          skip_validation=False):
     """
     Extract configuration values from the specified INI file and return them as a dictionary.
 
@@ -24,14 +25,16 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
     - config_file_path (str): The path to the configuration file.
     - show (bool): If True, print the configuration dictionary. If False, return the dictionary.
     - require_schedule (bool): If True, validate that schedule times are present.
+    - skip_validation (bool): If True, skip config validation (for --show-setup debugging).
 
     Returns:
     - dict: A dictionary containing the extracted configuration values if show=False.
     """
     config = load_config(logger, config_file_path)
 
-    # Run validation before extracting values
-    validate_config(logger, config, require_schedule=require_schedule)
+    # Run validation before extracting values (skip for --show-setup)
+    if not skip_validation:
+        validate_config(logger, config, require_schedule=require_schedule)
 
     try:
         # Extract and clean values with defaults
@@ -219,14 +222,3 @@ def load_config(logger, config_path):
         logger.error(f"Unexpected error while loading config file '{config_path}': {e}")
         sys.exit(1)
 
-def get_backup_directories(config):
-    """
-    Retrieves a list of backup directories from the configuration settings.
-    """
-    try:
-        backup_dirs = config.get('BACKUPS', 'backup_dirs')
-        return [dir.strip() for dir in backup_dirs.split(',')]
-    except (configparser.NoSectionError, configparser.NoOptionError) as e:
-        raise KeyError(f"Configuration section or option missing: {e}")
-    except ValueError as e:
-        raise ValueError(f"Invalid format for 'backup_directories': {e}")

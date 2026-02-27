@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-1.3.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.4.0-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
@@ -54,7 +54,7 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Remote Backups** | Sync to multiple SSH servers concurrently via SFTP (no rsync dependency) |
 | **Compression** | ZIP compression with optional password protection (AES encryption via pyminizip) |
 | **Scheduling** | Built-in scheduler with configurable times and tolerance-based matching |
-| **Notifications** | Real-time alerts via Telegram bot and/or email with configurable SMTP |
+| **Notifications** | Real-time alerts via Telegram bot and/or email with configurable SMTP and retry |
 | **Integrity** | SHA-256 checksum verification on every copied file |
 | **Security** | No plaintext secrets on disk, passwords delivered via in-memory buffers, secure SSH policies |
 | **Config Validation** | Fail-fast validation with clear error messages pointing to exact config fields |
@@ -110,7 +110,6 @@ backup_handler/
 │   ├── compression.py               # ZIP compression, password-protected archives
 │   ├── config.py                    # INI config loader, validator, normalize_none()
 │   ├── logger.py                    # Rotating file + console logger (AppLogger)
-│   ├── scheduler.py                 # Interval-based backup scheduling
 │   ├── sync.py                      # Local sync, SFTP upload, backup operations
 │   ├── utils.py                     # Checksums, OTP, timestamps, validation
 │   └── test.py                      # Email integration test
@@ -293,7 +292,7 @@ python main.py --show-setup
 |--------|-------------|
 | `--config PATH` | Path to configuration file (default: `config/config.ini`) |
 | `--operation-modes {local,ssh}` | Backup targets — can specify both |
-| `--source-dir PATH [PATH ...]` | Source directories to back up |
+| `--source-dir PATH` | Source directory to back up |
 | `--backup-dirs PATH [PATH ...]` | Local backup destinations |
 | `--ssh-servers HOST [HOST ...]` | Remote SSH servers |
 | `--backup-mode {full,incremental,differential}` | Backup strategy |
@@ -303,6 +302,7 @@ python main.py --show-setup
 | `--receiver EMAIL [EMAIL ...]` | Email recipients for notifications |
 | `--dry-run` | Preview what would be done without copying or syncing files |
 | `--show-setup` | Display current configuration and exit |
+| `--version` | Show program version and exit |
 
 ---
 
@@ -457,6 +457,7 @@ Logs are written to `Logs/application.log` with automatic rotation:
 | Scheduled backup not triggering | Ensure schedule times in config match HH:MM format and the process is running |
 | `Config error: 'compress_type' must be one of...` | Use `none`, `zip`, or `zip_pw` in `[DEFAULT] compress_type` |
 | `Config error: 'mode' must be full, incremental...` | Use `full`, `incremental`, or `differential` in `[DEFAULT] mode` |
+| `--scheduled and --dry-run cannot be used together` | Dry-run is for one-off previews; remove `--dry-run` when running in scheduled mode |
 | `Another backup-handler instance is already running` | A scheduled instance is already active. Kill it first, or remove `.backup-handler.lock` if stale |
 | Compression fails | Ensure `pyminizip` is installed. For `zip_pw`, verify the source directory is not empty |
 

@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import signal
 import atexit
 import logging
 from colorama import init
@@ -114,6 +115,18 @@ def main():
 def scheduled_operation(logger, config_file, telegram_bot=None):
     _acquire_lock(logger)
 
+    # Handle SIGINT/SIGTERM for clean shutdown
+    _shutdown_requested = False
+
+    def _handle_shutdown(signum, frame):
+        nonlocal _shutdown_requested
+        sig_name = signal.Signals(signum).name
+        logger.info(f"Received {sig_name}, shutting down scheduler gracefully...")
+        _shutdown_requested = True
+
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+
     try:
         # Loading the config file (with schedule validation)
         config_values = extract_config_values(logger, config_file, require_schedule=True)
@@ -131,7 +144,7 @@ def scheduled_operation(logger, config_file, telegram_bot=None):
                 continue
 
         logger.info(f"Scheduled times: {scheduled_times}")
-        while True:
+        while not _shutdown_requested:
             now = datetime.now()
             current_time = now.time()
             logger.info(f"Current time: {current_time}")
@@ -173,6 +186,8 @@ def scheduled_operation(logger, config_file, telegram_bot=None):
             # Wait for 30 seconds before checking again (matches tolerance window)
             time.sleep(30)
 
+        logger.info("Scheduler stopped cleanly.")
+
     except Exception as e:
         logger.error(f"Error in scheduled_operation: {e}")
         sys.exit(1)
@@ -183,9 +198,9 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                      telegram_bot=None, ssh_username=None, ssh_password=None,
                      dry_run=False):
 
-    # Show setup command
+    # Show setup command (skip validation so incomplete configs can be inspected)
     if show_setup:
-        extract_config_values(logger, CONFIG_PATH, show=True)
+        extract_config_values(logger, CONFIG_PATH, show=True, skip_validation=True)
         return
 
     # Execute selected backup modes

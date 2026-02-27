@@ -1,4 +1,5 @@
 import os
+import time
 import smtplib
 import configparser
 from pathlib import Path
@@ -9,8 +10,15 @@ from email.mime.application import MIMEApplication
 
 _EMAIL_CONFIG_PATH = Path(__file__).parent.parent / 'config' / 'email_config.ini'
 
+# Cached email config (loaded once per process)
+_cached_email_config = None
+
 
 def _load_email_config():
+    global _cached_email_config
+    if _cached_email_config is not None:
+        return _cached_email_config
+
     config_path = _EMAIL_CONFIG_PATH
     if not config_path.exists():
         raise FileNotFoundError(
@@ -39,7 +47,8 @@ def _load_email_config():
     smtp_host = email_section.get('smtp_host', 'smtp.gmail.com').strip()
     smtp_port = email_section.getint('smtp_port', 465)
 
-    return sender_email, app_password, smtp_host, smtp_port
+    _cached_email_config = (sender_email, app_password, smtp_host, smtp_port)
+    return _cached_email_config
 
 def send_email(receiver_emails, subject, body, attachment_paths=None, logger=None):
     """
@@ -70,7 +79,7 @@ def send_email(receiver_emails, subject, body, attachment_paths=None, logger=Non
         if attachment_paths:
             attach_files_to_email(message, attachment_paths, logger)
 
-        # Send the email
+        # Send the email with retry
         send_via_smtp(sender_email, app_password, receiver_emails, message, logger,
                       smtp_host=smtp_host, smtp_port=smtp_port)
 
@@ -133,22 +142,35 @@ def attach_files_to_email(message, attachment_paths, logger=None):
                 print(error_message)
 
 
+_SMTP_MAX_RETRIES = 2
+_SMTP_RETRY_DELAY = 3  # seconds
+
+
 def send_via_smtp(sender_email, app_password, receiver_emails, message, logger=None,
                   smtp_host='smtp.gmail.com', smtp_port=465):
     """
-    Send the email via SMTP.
+    Send the email via SMTP with retry on transient failures.
     """
-    try:
-        with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
-            server.login(sender_email, app_password)
-            server.sendmail(sender_email, receiver_emails, message.as_string())
+    last_error = None
+    for attempt in range(1, _SMTP_MAX_RETRIES + 1):
+        try:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+                server.login(sender_email, app_password)
+                server.sendmail(sender_email, receiver_emails, message.as_string())
 
-        if logger:
-            logger.info(f"Email sent successfully to: {', '.join(receiver_emails)}")
+            if logger:
+                logger.info(f"Email sent successfully to: {', '.join(receiver_emails)}")
+            return
 
-    except smtplib.SMTPException as e:
-        error_message = f"SMTP error occurred: {e}"
-        if logger:
-            logger.error(error_message)
-        else:
-            print(error_message)
+        except smtplib.SMTPException as e:
+            last_error = e
+            if attempt < _SMTP_MAX_RETRIES:
+                if logger:
+                    logger.warning(f"SMTP error on attempt {attempt}/{_SMTP_MAX_RETRIES}: {e}. Retrying in {_SMTP_RETRY_DELAY}s...")
+                time.sleep(_SMTP_RETRY_DELAY)
+            else:
+                error_message = f"SMTP error after {_SMTP_MAX_RETRIES} attempts: {e}"
+                if logger:
+                    logger.error(error_message)
+                else:
+                    print(error_message)
