@@ -85,10 +85,20 @@ copy_config config/db_config.ini.example config/db_config.ini
 # Create Logs directory
 mkdir -p Logs
 
+# Restrict config file permissions (contain credentials)
+print_message "Setting config file permissions to owner-only (chmod 600)..."
+for ini_file in config/config.ini config/bot_config.ini config/email_config.ini config/db_config.ini; do
+    if [ -f "$ini_file" ]; then
+        chmod 600 "$ini_file"
+        echo -e "${GREEN}  $ini_file -> 600${NC}"
+    fi
+done
+
 print_message "Setup completed successfully!"
 echo -e "${GREEN}Next steps:${NC}"
 echo "1. Update config/config.ini with your backup configuration."
 echo "2. Update config/bot_config.ini with your Telegram bot token (if using notifications)."
 echo "3. Update config/email_config.ini with your email settings (if using email alerts)."
 echo "4. Activate the venv: source venv/bin/activate"
-echo "5. Run the script: python main.py --help"
+echo "5. Verify your config: python main.py --dry-run --operation-modes local --backup-mode full --source-dir /data --backup-dirs /backups"
+echo "6. Run the script: python main.py --help"

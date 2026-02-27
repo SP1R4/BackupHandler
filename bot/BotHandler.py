@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import telebot
 import configparser
@@ -7,11 +8,13 @@ from threading import Thread, Event
 
 
 CONFIG_FILE = str(_Path(__file__).parent.parent / 'config' / 'bot_config.ini')
+_RUNTIME_USERS_FILE = str(_Path(__file__).parent.parent / 'config' / '.bot_users.json')
 
 class TelegramBot:
     def __init__(self, logger):
         """
         Initializes the TelegramBot instance with the given API token.
+        Loads config once and reuses parsed values.
         """
         config = configparser.ConfigParser()
         if os.path.exists(CONFIG_FILE):
@@ -19,15 +22,14 @@ class TelegramBot:
         else:
             raise FileNotFoundError(f"Configuration file '{CONFIG_FILE}' not found.")
         self.api_token = config['TELEGRAM']['api_token']
-        self.user_id = config['USERS']['interacted_users']
+        self._config_user_ids = config['USERS']['interacted_users']
         self.bot = telebot.TeleBot(self.api_token)
-        self.interacted_users = []  # List to keep track of users who have interacted with the bot
-        self.polling_thread = None  # Thread for bot polling
-        self.stop_event = Event()  # Event to signal stopping of the polling
-        self.logger = logger  # Logger for bot activities
-        self.user_file = 'interacted_users_ids.json'  # File to store interacted users' IDs
-        self.load_interacted_users()  # Load the list of interacted users from file
-        self.setup_handlers()  # Set up message handlers for the bot
+        self.interacted_users = []
+        self.polling_thread = None
+        self.stop_event = Event()
+        self.logger = logger
+        self.load_interacted_users()
+        self.setup_handlers()
 
     def setup_handlers(self):
         """
@@ -35,12 +37,6 @@ class TelegramBot:
         """
         @self.bot.message_handler(func=lambda message: True)
         def handle_any_message(message):
-            """
-            Handles incoming messages and registers users if they are not already registered.
-
-            Args:
-                message (telebot.types.Message): The incoming message from a user.
-            """
             user_id = message.chat.id
             if user_id not in self.interacted_users:
                 self.interacted_users.append(user_id)
@@ -50,12 +46,6 @@ class TelegramBot:
     def get_username(self, user_id):
         """
         Retrieves the username of a user given their user ID.
-
-        Args:
-            user_id (int): The user ID to retrieve the username for.
-
-        Returns:
-            str or None: The username if set, otherwise None.
         """
         try:
             chat = self.bot.get_chat(user_id)
@@ -72,34 +62,40 @@ class TelegramBot:
 
     def load_interacted_users(self):
         """
-        Loads the list of interacted users from the bot_config.ini file.
+        Loads interacted users from runtime JSON file, falling back to config values.
+        The runtime file is separate from bot_config.ini to avoid writing back to config.
         """
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE)
-        if 'USERS' in config and 'interacted_users' in config['USERS']:
-            self.interacted_users = [int(user_id) for user_id in config['USERS']['interacted_users'].split(',') if user_id]
+        # Try runtime file first
+        if os.path.exists(_RUNTIME_USERS_FILE):
+            try:
+                with open(_RUNTIME_USERS_FILE, 'r') as f:
+                    data = json.load(f)
+                self.interacted_users = data.get('user_ids', [])
+                return
+            except (json.JSONDecodeError, OSError) as e:
+                self.logger.warning(f"Failed to read runtime users file: {e}")
+
+        # Fall back to config values
+        if self._config_user_ids:
+            self.interacted_users = [int(uid) for uid in self._config_user_ids.split(',') if uid.strip()]
         else:
             self.interacted_users = []
 
     def save_interacted_users(self):
         """
-        Saves the list of interacted users to the bot_config.ini file.
+        Saves interacted users to a separate runtime JSON file.
+        Does not modify bot_config.ini.
         """
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE)
-        if 'USERS' not in config:
-            config['USERS'] = {}
-        config['USERS']['interacted_users'] = ','.join(map(str, self.interacted_users))
-        with open(CONFIG_FILE, 'w') as configfile:
-            config.write(configfile)
+        try:
+            with open(_RUNTIME_USERS_FILE, 'w') as f:
+                json.dump({'user_ids': self.interacted_users}, f)
+        except OSError as e:
+            self.logger.error(f"Failed to save runtime users file: {e}")
 
     def send_notification(self, text):
         """
         Sends a notification to all interacted users.
         Continues sending to remaining users even if one fails.
-
-        Args:
-            text (str): The message text to be sent as a notification.
         """
         if not self.interacted_users:
             return
@@ -124,10 +120,6 @@ class TelegramBot:
     def send_image(self, file_path, caption=None):
         """
         Sends an image to all interacted users.
-
-        Args:
-            file_path (str): Path to the image file.
-            caption (str, optional): Caption to include with the image.
         """
         if not self.interacted_users:
             return
@@ -146,11 +138,6 @@ class TelegramBot:
     def send_geolocation(self, latitude, longitude, live_period=60):
         """
         Sends a geolocation to all interacted users.
-
-        Args:
-            latitude (float): Latitude of the location.
-            longitude (float): Longitude of the location.
-            live_period (int, optional): Period in seconds for which the location should be updated. Defaults to 60.
         """
         if not self.interacted_users:
             return
@@ -169,11 +156,6 @@ class TelegramBot:
         """
         Sends a document to all interacted users.
         Supports both file paths and file-like objects (e.g. BytesIO).
-
-        Args:
-            file_path (str, optional): Path to the document file.
-            caption (str, optional): Caption to include with the document.
-            document (file-like, optional): A file-like object to send directly.
         """
         if not self.interacted_users:
             return
@@ -181,7 +163,6 @@ class TelegramBot:
             try:
                 if document is not None:
                     self.bot.send_document(user_id, document=document, caption=caption)
-                    # Reset buffer position for next user if it's seekable
                     if hasattr(document, 'seek'):
                         document.seek(0)
                 elif file_path is not None:
@@ -202,9 +183,6 @@ class TelegramBot:
         """
         Starts polling the Telegram API for a limited amount of time.
         Runs in a background thread so it doesn't block the caller.
-
-        Args:
-            timeout (int): The duration in seconds to keep polling.
         """
         self.stop_event.clear()
         self.polling_thread = Thread(target=self._poll_and_stop, args=(timeout,), daemon=True)
@@ -237,5 +215,5 @@ class TelegramBot:
         """
         if self.polling_thread and self.polling_thread.is_alive():
             self.logger.info("Stopping bot polling...")
-            self.bot.stop_polling()  # Stop polling immediately
-            self.polling_thread.join(timeout=10)  # Wait with timeout to avoid hanging
+            self.bot.stop_polling()
+            self.polling_thread.join(timeout=10)

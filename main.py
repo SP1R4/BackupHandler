@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import atexit
 import logging
 from colorama import init
 from pathlib import Path
@@ -30,6 +31,33 @@ from src.argparse_setup import setup_argparse, validate_args
 _PROJECT_ROOT = Path(__file__).parent
 CONFIG_PATH = str(_PROJECT_ROOT / 'config' / 'config.ini')
 LOG_PATH = str(_PROJECT_ROOT / 'Logs' / 'application.log')
+LOCK_FILE = _PROJECT_ROOT / '.backup-handler.lock'
+
+
+def _acquire_lock(logger):
+    """Acquire a PID lock file to prevent duplicate scheduled instances."""
+    if LOCK_FILE.exists():
+        try:
+            old_pid = int(LOCK_FILE.read_text().strip())
+            # Check if the process is still running
+            os.kill(old_pid, 0)
+            logger.error(f"Another backup-handler instance is already running (PID {old_pid}). "
+                         f"Remove {LOCK_FILE} if this is incorrect.")
+            sys.exit(1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            # PID file is stale — process no longer exists
+            logger.warning(f"Removing stale lock file (PID in file no longer running).")
+
+    LOCK_FILE.write_text(str(os.getpid()))
+    atexit.register(_release_lock)
+
+
+def _release_lock():
+    """Remove the PID lock file on exit."""
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 # Initialize colorama with autoreset to ensure color codes are reset after each print
 init(autoreset=True)
@@ -80,9 +108,12 @@ def main():
                          receiver=receiver_emails,
                          show_setup=args.show_setup,
                          notifications=args.notifications,
-                         telegram_bot=telegram_bot)
+                         telegram_bot=telegram_bot,
+                         dry_run=args.dry_run)
 
 def scheduled_operation(logger, config_file, telegram_bot=None):
+    _acquire_lock(logger)
+
     try:
         # Loading the config file (with schedule validation)
         config_values = extract_config_values(logger, config_file, require_schedule=True)
@@ -121,9 +152,9 @@ def scheduled_operation(logger, config_file, telegram_bot=None):
                 logger.info("Scheduled time matched. Performing backup operation...")
                 # Build operation_modes from config flags
                 operation_modes = []
-                if config_values.get('local'):
+                if config_values.get('local_mode'):
                     operation_modes.append('local')
-                if config_values.get('ssh'):
+                if config_values.get('ssh_mode'):
                     operation_modes.append('ssh')
                 backup_operation(logger,
                                  source_dir=config_values['source_dir'],
@@ -134,7 +165,9 @@ def scheduled_operation(logger, config_file, telegram_bot=None):
                                  compress=config_values['compress_type'],
                                  receiver=config_values['receiver_emails'],
                                  notifications=bool(telegram_bot),
-                                 telegram_bot=telegram_bot)
+                                 telegram_bot=telegram_bot,
+                                 ssh_username=config_values.get('ssh_username'),
+                                 ssh_password=config_values.get('ssh_password'))
             else:
                 logger.info("No scheduled time matched.")
             # Wait for 30 seconds before checking again (matches tolerance window)
@@ -147,7 +180,8 @@ def scheduled_operation(logger, config_file, telegram_bot=None):
 def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None,
                      operation_modes=None, backup_mode=None, compress=None,
                      receiver=None, show_setup=False, notifications=False,
-                     telegram_bot=None):
+                     telegram_bot=None, ssh_username=None, ssh_password=None,
+                     dry_run=False):
 
     # Show setup command
     if show_setup:
@@ -158,7 +192,14 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
     if operation_modes is None:
         operation_modes = []
     if 'local' in operation_modes:
-        if backup_mode == 'incremental':
+        if dry_run:
+            logger.info(f"[DRY RUN] Would perform {backup_mode or 'full'} backup: '{source_dir}' -> {backup_dirs}")
+            print(f"[DRY RUN] Would perform {backup_mode or 'full'} backup")
+            print(f"  Source:      {source_dir}")
+            print(f"  Destinations: {', '.join(backup_dirs) if backup_dirs else 'None'}")
+            if compress:
+                print(f"  Compression: {compress}")
+        elif backup_mode == 'incremental':
             if compress:
                 logger.error("Invalid option for incremental backup.")
                 sys.exit(1)
@@ -198,17 +239,27 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                     telegram_bot.send_notification("Full backup failed.")
 
     if operation_modes and ('ssh' in operation_modes):
-        if notifications:
-            telegram_bot.send_notification("Starting SSH backup...")
-        logger.info("Running SSH backup...")
-        try:
-            sync_ssh_servers_concurrently(source_dir, ssh_servers, username='', logger=logger)
+        if dry_run:
+            logger.info(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {ssh_servers}")
+            print(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {', '.join(ssh_servers or [])}")
+        else:
             if notifications:
-                telegram_bot.send_notification("SSH backup completed.")
-        except Exception as e:
-            logger.error(f"SSH backup failed: {e}")
-            if notifications:
-                telegram_bot.send_notification("SSH backup failed.")
+                telegram_bot.send_notification("Starting SSH backup...")
+            logger.info("Running SSH backup...")
+            try:
+                sync_ssh_servers_concurrently(source_dir, ssh_servers, username=ssh_username or '',
+                                              password=ssh_password, logger=logger)
+                if notifications:
+                    telegram_bot.send_notification("SSH backup completed.")
+            except Exception as e:
+                logger.error(f"SSH backup failed: {e}")
+                if notifications:
+                    telegram_bot.send_notification("SSH backup failed.")
+
+    if dry_run:
+        logger.info("[DRY RUN] Complete. No files were modified.")
+        print("\n[DRY RUN] Complete. No files were modified.")
+        return
 
     # Update the backup timestamp after successful execution
     update_last_backup_time()
