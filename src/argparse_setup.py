@@ -18,7 +18,7 @@ def setup_argparse():
     parser.add_argument(
         '--version',
         action='version',
-        version='backup-handler 2.0.0'
+        version='backup-handler 2.2.0'
     )
 
     # Configuration file argument
@@ -40,9 +40,9 @@ def setup_argparse():
     parser.add_argument(
         '--operation-modes',
         nargs='+',
-        choices=['local', 'ssh', 's3'],
+        choices=['local', 'ssh', 's3', 'db'],
         default=['local'],
-        help='Select operation modes to run (default: local). Choices: local, ssh, s3'
+        help='Select operation modes to run (default: local). Choices: local, ssh, s3, db'
     )
 
     # Directory and server overrides
@@ -145,6 +145,27 @@ def setup_argparse():
         help='Restore to a specific point in time (YYYYMMDD_HHMMSS format, uses manifests)'
     )
 
+    # Verify backup integrity
+    parser.add_argument(
+        '--verify',
+        action='store_true',
+        help='Verify backup integrity by checking files against the latest manifest checksums'
+    )
+
+    # Deduplication option
+    parser.add_argument(
+        '--dedup',
+        action='store_true',
+        help='Enable file-level deduplication using hardlinks for identical files across backups'
+    )
+
+    # Encryption option
+    parser.add_argument(
+        '--encrypt',
+        action='store_true',
+        help='Encrypt backup files at rest using AES-256-GCM (overrides config [ENCRYPTION] enabled)'
+    )
+
     # Notifications option
     parser.add_argument(
         '--notifications',
@@ -195,6 +216,11 @@ def validate_args(args, logger):
             if not is_valid_email(email):
                 logger.error(f"Invalid email address: {email}")
                 sys.exit(1)
+
+    # --verify is mutually exclusive with --scheduled and --backup-mode
+    if args.verify and (args.scheduled or args.backup_mode or args.restore):
+        logger.error("--verify cannot be used with --scheduled, --backup-mode, or --restore.")
+        sys.exit(1)
 
     # Warn if both local and ssh modes are selected
     if 'local' in args.operation_modes and 'ssh' in args.operation_modes:
