@@ -124,24 +124,55 @@ def _find_file_in_backup(backup_dir, original_path):
     """Try to locate a file in the backup directory by its original path."""
     orig = Path(original_path)
 
-    # Try exact relative match from backup dir
-    for candidate in backup_dir.rglob(orig.name):
-        if candidate.is_file():
-            return candidate
+    # Try matching by relative path suffix to handle subdirectory structure
+    # This avoids false matches when multiple files share the same name
+    orig_parts = orig.parts
+    best_match = None
+    best_match_len = 0
 
-    return None
+    for candidate in backup_dir.rglob(orig.name):
+        if not candidate.is_file():
+            continue
+        # Score by how many trailing path components match
+        cand_parts = candidate.relative_to(backup_dir).parts
+        match_len = 0
+        for o, c in zip(reversed(orig_parts), reversed(cand_parts)):
+            if o == c:
+                match_len += 1
+            else:
+                break
+        if match_len > best_match_len:
+            best_match = candidate
+            best_match_len = match_len
+
+    return best_match
 
 
 def _find_encrypted_file(backup_dir, original_path):
     """Try to find the encrypted (.enc) version of a file."""
     orig = Path(original_path)
     enc_name = orig.name + '.enc'
+    orig_parts = orig.parts
+    best_match = None
+    best_match_len = 0
 
     for candidate in backup_dir.rglob(enc_name):
-        if candidate.is_file():
-            return candidate
+        if not candidate.is_file():
+            continue
+        cand_parts = candidate.relative_to(backup_dir).parts
+        # Remove .enc suffix for comparison
+        cand_parts_adj = cand_parts[:-1] + (cand_parts[-1].removesuffix('.enc'),)
+        match_len = 0
+        for o, c in zip(reversed(orig_parts), reversed(cand_parts_adj)):
+            if o == c:
+                match_len += 1
+            else:
+                break
+        if match_len > best_match_len:
+            best_match = candidate
+            best_match_len = match_len
 
-    return None
+    return best_match
 
 
 def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file, dir_result):

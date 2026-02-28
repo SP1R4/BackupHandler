@@ -35,6 +35,7 @@ def send_smtp_email(logger, smtp_host, smtp_port, smtp_user, smtp_password,
 
     retries = 3
     for attempt in range(1, retries + 1):
+        server = None
         try:
             server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
             if use_tls:
@@ -47,8 +48,18 @@ def send_smtp_email(logger, smtp_host, smtp_port, smtp_user, smtp_password,
             return True
         except smtplib.SMTPAuthenticationError as e:
             logger.error(f"SMTP authentication failed: {e}")
+            if server:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
             return False  # Don't retry auth failures
         except Exception as e:
+            if server:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
             logger.warning(f"SMTP send attempt {attempt}/{retries} failed: {e}")
             if attempt == retries:
                 logger.error(f"Failed to send SMTP email after {retries} attempts: {e}")
