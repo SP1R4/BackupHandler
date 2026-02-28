@@ -5,6 +5,11 @@ source_dir = /path/to/source
 mode = full
 # OPTIONAL: Compression type — none | zip | zip_pw (password-protected)
 compress_type = zip
+# OPTIONAL: Comma-separated glob patterns to exclude from backups
+# Example: *.log,*.tmp,__pycache__/*,.git/*
+exclude_patterns = None
+# OPTIONAL: Number of parallel file copy threads for local backups (default: 1 = sequential)
+parallel_copies = 1
 
 [BACKUPS]
 # REQUIRED: Comma-separated list of local backup destination directories
@@ -17,6 +22,20 @@ ssh_servers = None
 username = None
 # OPTIONAL: SSH password (required if ssh mode is True)
 password = None
+# OPTIONAL: Bandwidth limit for SFTP uploads in KB/s (0 = unlimited)
+bandwidth_limit = 0
+
+[S3]
+# OPTIONAL: S3 bucket name (required if s3 mode is True)
+bucket = None
+# OPTIONAL: S3 key prefix (folder path in bucket)
+prefix =
+# OPTIONAL: AWS region (required if s3 mode is True)
+region = None
+# OPTIONAL: AWS access key (uses default credentials if not set)
+access_key = None
+# OPTIONAL: AWS secret key (uses default credentials if not set)
+secret_key = None
 
 [SCHEDULE]
 # REQUIRED (for --scheduled mode): Comma-separated times in HH:MM (24-hour) format
@@ -29,6 +48,20 @@ interval_minutes = 60
 local = True
 # REQUIRED: Enable SSH/SFTP backups (True/False)
 ssh = False
+# OPTIONAL: Enable S3 cloud backups (True/False)
+s3 = False
+
+[HOOKS]
+# OPTIONAL: Shell command to run before backup (non-zero exit aborts the backup)
+pre_backup = None
+# OPTIONAL: Shell command to run after backup (failure is logged but doesn't affect backup status)
+post_backup = None
+
+[RETENTION]
+# OPTIONAL: Remove backups older than this many days (0 = disabled)
+max_age_days = 0
+# OPTIONAL: Keep only the N most recent backups per directory (0 = unlimited)
+max_count = 0
 
 [NOTIFICATIONS]
 # OPTIONAL: Enable Telegram bot notifications (True/False)

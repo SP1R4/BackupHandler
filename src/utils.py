@@ -5,6 +5,8 @@ import json
 import random
 import string
 import hashlib
+import fnmatch
+import subprocess
 import keyring
 from pathlib import Path
 
@@ -13,6 +15,70 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).parent.parent
 TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "backup_timestamp.json"
 FULL_BACKUP_TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "full_backup_timestamp.json"
+
+def should_exclude(file_path, patterns):
+    """
+    Check if a file path matches any of the exclude patterns.
+
+    Parameters:
+    - file_path (Path or str): The file path to check.
+    - patterns (list of str): Glob patterns to match against (e.g., ['*.log', '__pycache__/*']).
+
+    Returns:
+    - bool: True if the file should be excluded, False otherwise.
+    """
+    if not patterns:
+        return False
+    file_path = Path(file_path)
+    filename = file_path.name
+    relative_str = str(file_path)
+    for pattern in patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        # Match against filename
+        if fnmatch.fnmatch(filename, pattern):
+            return True
+        # Match against relative path
+        if fnmatch.fnmatch(relative_str, pattern):
+            return True
+    return False
+
+
+def run_hook(logger, command, hook_name):
+    """
+    Execute a pre/post backup hook command.
+
+    Parameters:
+    - logger: Logger instance.
+    - command (str): Shell command to execute.
+    - hook_name (str): Name of the hook (for logging).
+
+    Returns:
+    - bool: True if the hook succeeded (exit code 0), False otherwise.
+    """
+    if not command or not command.strip():
+        return True
+    logger.info(f"Running {hook_name} hook: {command}")
+    try:
+        result = subprocess.run(command, shell=True, timeout=300,
+                                capture_output=True, text=True)
+        if result.stdout.strip():
+            logger.info(f"[{hook_name}] stdout: {result.stdout.strip()}")
+        if result.stderr.strip():
+            logger.warning(f"[{hook_name}] stderr: {result.stderr.strip()}")
+        if result.returncode != 0:
+            logger.error(f"{hook_name} hook failed with exit code {result.returncode}")
+            return False
+        logger.info(f"{hook_name} hook completed successfully.")
+        return True
+    except subprocess.TimeoutExpired:
+        logger.error(f"{hook_name} hook timed out after 300 seconds.")
+        return False
+    except Exception as e:
+        logger.error(f"{hook_name} hook failed: {e}")
+        return False
+
 
 def generate_otp(length=8):
     """

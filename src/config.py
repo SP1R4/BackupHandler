@@ -47,6 +47,30 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         raw_password = normalize_none(config.get('SSH', 'password', fallback=None))
         raw_receiver_emails = normalize_none(config.get('NOTIFICATIONS', 'receiver_emails', fallback=None))
 
+        # Exclude patterns from config
+        raw_exclude = normalize_none(config.get('DEFAULT', 'exclude_patterns', fallback=None))
+
+        # Hooks
+        pre_backup_hook = normalize_none(config.get('HOOKS', 'pre_backup', fallback=None))
+        post_backup_hook = normalize_none(config.get('HOOKS', 'post_backup', fallback=None))
+
+        # Retention
+        max_age_days = config.getint('RETENTION', 'max_age_days', fallback=0)
+        max_count = config.getint('RETENTION', 'max_count', fallback=0)
+
+        # Parallel copies
+        parallel_copies = config.getint('DEFAULT', 'parallel_copies', fallback=1)
+
+        # SSH bandwidth limit
+        bandwidth_limit = config.getint('SSH', 'bandwidth_limit', fallback=0)
+
+        # S3 config
+        s3_bucket = normalize_none(config.get('S3', 'bucket', fallback=None))
+        s3_prefix = normalize_none(config.get('S3', 'prefix', fallback=None)) or ''
+        s3_region = normalize_none(config.get('S3', 'region', fallback=None))
+        s3_access_key = normalize_none(config.get('S3', 'access_key', fallback=None))
+        s3_secret_key = normalize_none(config.get('S3', 'secret_key', fallback=None))
+
         config_vars = {
             'source_dir': config.get('DEFAULT', 'source_dir', fallback=None),
             'mode': config.get('DEFAULT', 'mode', fallback='full'),
@@ -59,8 +83,21 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             'interval_minutes': config.getint('SCHEDULE', 'interval_minutes', fallback=1),
             'local_mode': config.getboolean('MODES', 'local', fallback=False),
             'ssh_mode': config.getboolean('MODES', 'ssh', fallback=False),
+            's3_mode': config.getboolean('MODES', 's3', fallback=False),
             'bot': config.getboolean('NOTIFICATIONS', 'bot', fallback=False),
             'receiver_emails': None,
+            'exclude_patterns': [p.strip() for p in raw_exclude.split(',') if p.strip()] if raw_exclude else [],
+            'pre_backup_hook': pre_backup_hook,
+            'post_backup_hook': post_backup_hook,
+            'max_age_days': max_age_days,
+            'max_count': max_count,
+            'parallel_copies': max(1, parallel_copies),
+            'bandwidth_limit': max(0, bandwidth_limit),
+            's3_bucket': s3_bucket,
+            's3_prefix': s3_prefix,
+            's3_region': s3_region,
+            's3_access_key': s3_access_key,
+            's3_secret_key': s3_secret_key,
         }
 
         # Resolve relative paths to absolute
@@ -75,17 +112,25 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         if show:
             print("Current Configuration:\n")
             print("DEFAULT:")
-            print(f"  Source Directory : {config_vars['source_dir']}")
+            print(f"  Source Directory  : {config_vars['source_dir']}")
             print(f"  Mode             : {config_vars['mode']}")
-            print(f"  Compress Type    : {config_vars['compress_type']}\n")
+            print(f"  Compress Type    : {config_vars['compress_type']}")
+            print(f"  Exclude Patterns : {', '.join(config_vars['exclude_patterns']) if config_vars['exclude_patterns'] else 'None'}")
+            print(f"  Parallel Copies  : {config_vars['parallel_copies']}\n")
 
             print("BACKUPS:")
             print(f"  Backup Directories: {', '.join(config_vars['backup_dirs'])}\n")
 
             print("SSH:")
-            print(f"  SSH Servers  : {', '.join(config_vars['ssh_servers']) if config_vars['ssh_servers'] else 'Not Set'}")
-            print(f"  SSH Username : {config_vars['ssh_username'] or 'Not Set'}")
-            print(f"  SSH Password : {'*' * len(config_vars['ssh_password']) if config_vars['ssh_password'] else 'Not Set'}\n")
+            print(f"  SSH Servers      : {', '.join(config_vars['ssh_servers']) if config_vars['ssh_servers'] else 'Not Set'}")
+            print(f"  SSH Username     : {config_vars['ssh_username'] or 'Not Set'}")
+            print(f"  SSH Password     : {'*' * len(config_vars['ssh_password']) if config_vars['ssh_password'] else 'Not Set'}")
+            print(f"  Bandwidth Limit  : {config_vars['bandwidth_limit']} KB/s\n" if config_vars['bandwidth_limit'] else "  Bandwidth Limit  : Unlimited\n")
+
+            print("S3:")
+            print(f"  Bucket  : {config_vars['s3_bucket'] or 'Not Set'}")
+            print(f"  Prefix  : {config_vars['s3_prefix'] or '/'}")
+            print(f"  Region  : {config_vars['s3_region'] or 'Not Set'}\n")
 
             print("SCHEDULE:")
             print(f"  Times          : {', '.join(config_vars['schedule_times']) if config_vars['schedule_times'] else 'Not Set'}")
@@ -93,7 +138,16 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
 
             print("MODES:")
             print(f"  Local Backup : {'Enabled' if config_vars['local_mode'] else 'Disabled'}")
-            print(f"  SSH Backup   : {'Enabled' if config_vars['ssh_mode'] else 'Disabled'}\n")
+            print(f"  SSH Backup   : {'Enabled' if config_vars['ssh_mode'] else 'Disabled'}")
+            print(f"  S3 Backup    : {'Enabled' if config_vars['s3_mode'] else 'Disabled'}\n")
+
+            print("HOOKS:")
+            print(f"  Pre-Backup  : {config_vars['pre_backup_hook'] or 'Not Set'}")
+            print(f"  Post-Backup : {config_vars['post_backup_hook'] or 'Not Set'}\n")
+
+            print("RETENTION:")
+            print(f"  Max Age (days) : {config_vars['max_age_days'] or 'Disabled'}")
+            print(f"  Max Count      : {config_vars['max_count'] or 'Unlimited'}\n")
 
             print("NOTIFICATIONS:")
             print(f"  Bot             : {'Enabled' if config_vars['bot'] else 'Disabled'}")
@@ -152,6 +206,20 @@ def validate_config(logger, config, require_schedule=False):
         if not normalize_none(config.get('SSH', 'password', fallback=None)):
             errors.append("Config error: 'password' is not set in [SSH]. Required when ssh mode is enabled")
 
+    # Validate S3 fields only when MODES.s3 = True
+    s3_enabled = False
+    if 'MODES' in config:
+        try:
+            s3_enabled = config.getboolean('MODES', 's3', fallback=False)
+        except ValueError:
+            errors.append("Config error: 's3' in [MODES] must be True or False")
+
+    if s3_enabled:
+        if not normalize_none(config.get('S3', 'bucket', fallback=None)):
+            errors.append("Config error: 'bucket' is not set in [S3]. Required when s3 mode is enabled")
+        if not normalize_none(config.get('S3', 'region', fallback=None)):
+            errors.append("Config error: 'region' is not set in [S3]. Required when s3 mode is enabled")
+
     # Validate schedule only when --scheduled is used
     if require_schedule:
         schedule_times = normalize_none(config.get('SCHEDULE', 'times', fallback=None))
@@ -173,7 +241,7 @@ def validate_config(logger, config, require_schedule=False):
 
     # Validate MODES values
     if 'MODES' in config:
-        for key in ('local', 'ssh'):
+        for key in ('local', 'ssh', 's3'):
             val = config.get('MODES', key, fallback=None)
             if val is not None and val not in ('True', 'False', 'true', 'false'):
                 errors.append(f"Config error: '{key}' in [MODES] must be True or False, got '{val}'")
@@ -227,4 +295,3 @@ def load_config(logger, config_path):
     except Exception as e:
         logger.error(f"Unexpected error while loading config file '{config_path}': {e}")
         sys.exit(1)
-
