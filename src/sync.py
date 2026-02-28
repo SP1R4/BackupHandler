@@ -1,17 +1,21 @@
 import os
 import stat
+import time
 import shutil
+import threading
 import paramiko
 from tqdm import tqdm
 from pathlib import Path
 from retrying import retry
 from email_nots.email import send_email
 from .compression import compress_directory
-from .utils import verify_backup, generate_otp, handle_symlink
+from .utils import verify_backup, generate_otp, handle_symlink, should_exclude
 from concurrent.futures import ThreadPoolExecutor
 
 
-def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=None, bot=None, receiver_emails=None):
+def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=None,
+                                   bot=None, receiver_emails=None, exclude_patterns=None,
+                                   manifest=None, parallel_copies=1):
     """
     Sync files from source directories to backup directories with progress tracking.
 
@@ -22,35 +26,20 @@ def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=No
     - compress (str, optional): If 'zip', compress the final backup directory. If 'zip_pw', compress with a password.
     - bot (TelegramBot, optional): Telegram bot instance for sending notifications.
     - receiver_emails (list of str, optional): List of emails to notify after backup.
+    - exclude_patterns (list of str, optional): Glob patterns to exclude.
+    - manifest (BackupManifest, optional): Manifest to record file operations.
+    - parallel_copies (int, optional): Number of parallel copy threads (default 1 = sequential).
     """
     for src_dir in source_dirs:
         # List all files in the current source directory
-        files = list(Path(src_dir).rglob('*'))
+        files = [f for f in Path(src_dir).rglob('*')
+                 if not f.is_dir() and not should_exclude(f.relative_to(src_dir), exclude_patterns)]
 
         for backup_dir in backup_dirs:
-            for file in tqdm(files, desc=f"Syncing Files from {src_dir} to {backup_dir}", unit="files"):
-                backup_file = Path(backup_dir) / file.relative_to(src_dir)
-
-                # Skip directories
-                if file.is_dir():
-                    continue
-
-                try:
-                    # Ensure the destination directory exists
-                    backup_file.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Handle symlinks separately
-                    if file.is_symlink():
-                        handle_symlink(logger, str(file), str(backup_file))
-                        continue
-
-                    shutil.copy2(file, backup_file)
-                    if verify_backup(file, backup_file):
-                        logger.info(f"Successfully backed up {file} to {backup_file}") if logger else print(f"Successfully backed up {file} to {backup_file}")
-                    else:
-                        logger.error(f"Checksum verification failed for {file}") if logger else print(f"Checksum verification failed for {file}")
-                except Exception as e:
-                    logger.error(f"Failed to backup {file} to {backup_file}: {e}")
+            if parallel_copies > 1:
+                _sync_parallel(logger, files, src_dir, backup_dir, manifest, parallel_copies)
+            else:
+                _sync_sequential(logger, files, src_dir, backup_dir, manifest)
 
     # Compress the backup directories if the compress flag is set
     if compress in ['zip', 'zip_pw']:
@@ -79,7 +68,98 @@ def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=No
             logger.error(f"Failed to send email notification: {e}")
 
 
-def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=None):
+def _sync_sequential(logger, files, src_dir, backup_dir, manifest):
+    """Sync files sequentially with a progress bar."""
+    for file in tqdm(files, desc=f"Syncing Files from {src_dir} to {backup_dir}", unit="files"):
+        _copy_single_file(logger, file, src_dir, backup_dir, manifest)
+
+
+def _sync_parallel(logger, files, src_dir, backup_dir, manifest, parallel_copies):
+    """Sync files in parallel using a thread pool with a thread-safe progress bar."""
+    progress_lock = threading.Lock()
+    pbar = tqdm(total=len(files), desc=f"Syncing Files from {src_dir} to {backup_dir}", unit="files")
+
+    def copy_task(file):
+        _copy_single_file(logger, file, src_dir, backup_dir, manifest)
+        with progress_lock:
+            pbar.update(1)
+
+    with ThreadPoolExecutor(max_workers=parallel_copies) as executor:
+        futures = [executor.submit(copy_task, f) for f in files]
+        for future in futures:
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"Parallel copy error: {e}")
+
+    pbar.close()
+
+
+def _copy_single_file(logger, file, src_dir, backup_dir, manifest):
+    """Copy a single file from source to backup, with optional manifest recording."""
+    backup_file = Path(backup_dir) / file.relative_to(src_dir)
+
+    try:
+        # Ensure the destination directory exists
+        backup_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Handle symlinks separately
+        if file.is_symlink():
+            handle_symlink(logger, str(file), str(backup_file))
+            if manifest:
+                manifest.record_copy(str(file), file.stat().st_size if file.exists() else 0)
+            return
+
+        shutil.copy2(file, backup_file)
+        if verify_backup(file, backup_file):
+            logger.info(f"Successfully backed up {file} to {backup_file}") if logger else print(f"Successfully backed up {file} to {backup_file}")
+            if manifest:
+                manifest.record_copy(str(file), file.stat().st_size)
+        else:
+            logger.error(f"Checksum verification failed for {file}") if logger else print(f"Checksum verification failed for {file}")
+            if manifest:
+                manifest.record_failure(str(file), "Checksum verification failed")
+    except Exception as e:
+        logger.error(f"Failed to backup {file} to {backup_file}: {e}")
+        if manifest:
+            manifest.record_failure(str(file), str(e))
+
+
+def _sftp_put_throttled(sftp, local_path, remote_path, bandwidth_limit_kbps):
+    """
+    Upload a file via SFTP with bandwidth throttling.
+
+    Parameters:
+    - sftp: paramiko SFTP client.
+    - local_path (str): Local file path.
+    - remote_path (str): Remote file path.
+    - bandwidth_limit_kbps (int): Max transfer speed in KB/s. 0 = unlimited.
+    """
+    if bandwidth_limit_kbps <= 0:
+        sftp.put(str(local_path), remote_path)
+        return
+
+    chunk_size = 32768  # 32KB chunks
+    bytes_per_second = bandwidth_limit_kbps * 1024
+
+    with open(local_path, 'rb') as local_file:
+        with sftp.open(remote_path, 'wb') as remote_file:
+            remote_file.set_pipelined(True)
+            while True:
+                start = time.monotonic()
+                data = local_file.read(chunk_size)
+                if not data:
+                    break
+                remote_file.write(data)
+                # Pace the transfer
+                elapsed = time.monotonic() - start
+                expected = len(data) / bytes_per_second
+                if elapsed < expected:
+                    time.sleep(expected - elapsed)
+
+
+def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=None,
+                           exclude_patterns=None, manifest=None, bandwidth_limit=0):
     """
     Upload a local directory to a remote server via SFTP.
 
@@ -89,9 +169,13 @@ def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=No
     - remote_path (str): Remote directory path.
     - mode (str): Backup mode ('full', 'incremental', 'differential').
     - logger: Logger instance.
+    - exclude_patterns (list of str, optional): Glob patterns to exclude.
+    - manifest (BackupManifest, optional): Manifest to record file operations.
+    - bandwidth_limit (int): Bandwidth limit in KB/s (0 = unlimited).
     """
     local_path = Path(local_path)
-    files = [f for f in local_path.rglob('*') if f.is_file()]
+    files = [f for f in local_path.rglob('*')
+             if f.is_file() and not should_exclude(f.relative_to(local_path), exclude_patterns)]
 
     for local_file in tqdm(files, desc=f"Uploading to {remote_path}", unit="files"):
         relative = local_file.relative_to(local_path)
@@ -113,17 +197,23 @@ def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=No
                 elif mode == 'differential':
                     # Only upload if local is newer
                     should_upload = local_mtime > remote_mtime
+                if not should_upload and manifest:
+                    manifest.record_skip(str(local_file))
             except FileNotFoundError:
                 should_upload = True  # File doesn't exist remotely
 
         if should_upload:
             try:
-                sftp.put(str(local_file), remote_file)
+                _sftp_put_throttled(sftp, str(local_file), remote_file, bandwidth_limit)
                 if logger:
                     logger.info(f"Uploaded {local_file} -> {remote_file}")
+                if manifest:
+                    manifest.record_copy(str(local_file), local_file.stat().st_size)
             except Exception as e:
                 if logger:
                     logger.error(f"Failed to upload {local_file}: {e}")
+                if manifest:
+                    manifest.record_failure(str(local_file), str(e))
 
     # In full mode, remove remote files not present locally
     if mode == 'full':
@@ -185,7 +275,9 @@ def _sftp_cleanup_extra_files(sftp, local_path, remote_path, logger=None):
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
-def sync_ssh_server(source_dir, server, username, password=None, key_filepath=None, mode='full', logger=None, bot=None):
+def sync_ssh_server(source_dir, server, username, password=None, key_filepath=None,
+                    mode='full', logger=None, bot=None, exclude_patterns=None,
+                    manifest=None, bandwidth_limit=0):
     """
     Sync a local directory to a remote server via SSH using SFTP, with retry logic.
 
@@ -198,6 +290,9 @@ def sync_ssh_server(source_dir, server, username, password=None, key_filepath=No
     - mode (str, optional): Backup mode ('full', 'incremental', 'differential').
     - logger (logging.Logger, optional): Logger instance for logging.
     - bot (TelegramBot, optional): Bot instance for sending notifications.
+    - exclude_patterns (list of str, optional): Glob patterns to exclude.
+    - manifest (BackupManifest, optional): Manifest to record file operations.
+    - bandwidth_limit (int): Bandwidth limit in KB/s (0 = unlimited).
     """
     if logger:
         logger.info(f"Syncing {source_dir} to SSH server: {server} in {mode} mode")
@@ -217,7 +312,9 @@ def sync_ssh_server(source_dir, server, username, password=None, key_filepath=No
         sftp = ssh.open_sftp()
         try:
             remote_path = source_dir  # Mirror the local path on the remote
-            _sftp_upload_directory(sftp, source_dir, remote_path, mode=mode, logger=logger)
+            _sftp_upload_directory(sftp, source_dir, remote_path, mode=mode, logger=logger,
+                                   exclude_patterns=exclude_patterns, manifest=manifest,
+                                   bandwidth_limit=bandwidth_limit)
         finally:
             sftp.close()
 
@@ -236,7 +333,10 @@ def sync_ssh_server(source_dir, server, username, password=None, key_filepath=No
         else:
             print(f"Closed connection to SSH server: {server}")
 
-def sync_ssh_servers_concurrently(source_dir, ssh_servers, username, password=None, key_filepath=None, mode='full', logger=None, bot=None, receiver_emails=None):
+def sync_ssh_servers_concurrently(source_dir, ssh_servers, username, password=None,
+                                  key_filepath=None, mode='full', logger=None, bot=None,
+                                  receiver_emails=None, exclude_patterns=None,
+                                  manifest=None, bandwidth_limit=0):
     """
     Sync a local directory to multiple SSH servers concurrently.
 
@@ -250,11 +350,16 @@ def sync_ssh_servers_concurrently(source_dir, ssh_servers, username, password=No
     - logger (logging.Logger, optional): Logger instance for logging.
     - bot (TelegramBot, optional): Bot instance for notifications.
     - receiver_emails (list of str, optional): List of email addresses for notifications.
+    - exclude_patterns (list of str, optional): Glob patterns to exclude.
+    - manifest (BackupManifest, optional): Manifest to record file operations.
+    - bandwidth_limit (int): Bandwidth limit in KB/s (0 = unlimited).
     """
 
     def sync_ssh_server_task(server):
         try:
-            sync_ssh_server(source_dir, server, username, password, key_filepath, mode, logger=logger, bot=bot)
+            sync_ssh_server(source_dir, server, username, password, key_filepath, mode,
+                            logger=logger, bot=bot, exclude_patterns=exclude_patterns,
+                            manifest=manifest, bandwidth_limit=bandwidth_limit)
         except Exception as e:
             if logger:
                 logger.error(f"Failed to sync to SSH server {server}: {e}")
@@ -281,26 +386,32 @@ def sync_ssh_servers_concurrently(source_dir, ssh_servers, username, password=No
         send_email(receiver_emails, "Backup Completed", f"Backup completed for {source_dir}", logger=logger)
 
 
-def perform_full_backup(logger, source_dir, backup_dirs, compress=None, bot=None, receiver_emails=None):
+def perform_full_backup(logger, source_dir, backup_dirs, compress=None, bot=None,
+                        receiver_emails=None, exclude_patterns=None, manifest=None,
+                        parallel_copies=1):
     """
     Perform a full backup of the source directory to the backup directories.
     """
     logger.info(f"Performing full backup from {source_dir}")
     if isinstance(source_dir, str):
         source_dir = [source_dir]
-    sync_directories_with_progress(logger, source_dir, backup_dirs, compress=compress, bot=bot, receiver_emails=receiver_emails)
+    sync_directories_with_progress(logger, source_dir, backup_dirs, compress=compress,
+                                   bot=bot, receiver_emails=receiver_emails,
+                                   exclude_patterns=exclude_patterns, manifest=manifest,
+                                   parallel_copies=parallel_copies)
 
-def perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time, bot=None, receiver_emails=None):
+def perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time,
+                               bot=None, receiver_emails=None, exclude_patterns=None,
+                               manifest=None):
     """
     Perform an incremental backup of the source directory to the backup directories.
     """
     logger.info(f"Performing incremental backup from {source_dir} since last backup time: {last_backup_time}")
-    files = list(Path(source_dir).rglob('*'))
+    files = [f for f in Path(source_dir).rglob('*')
+             if not f.is_dir() and not should_exclude(f.relative_to(source_dir), exclude_patterns)]
 
     failed_count = 0
     for file in tqdm(files, desc="Syncing Incremental Files", unit="files"):
-        if file.is_dir():
-            continue
         file_mtime = os.path.getmtime(file)
         for backup_dir in backup_dirs:
             backup_file = Path(backup_dir) / file.relative_to(source_dir)
@@ -310,18 +421,28 @@ def perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time
                     backup_file.parent.mkdir(parents=True, exist_ok=True)
                     if file.is_symlink():
                         handle_symlink(logger, str(file), str(backup_file))
+                        if manifest:
+                            manifest.record_copy(str(file), file.stat().st_size if file.exists() else 0)
                         continue
                     shutil.copy2(file, backup_file)
                     if verify_backup(file, backup_file):
                         logger.info(f"Incremental backup of {file} to {backup_file}")
+                        if manifest:
+                            manifest.record_copy(str(file), file.stat().st_size)
                     else:
                         logger.error(f"Checksum verification failed for {file}")
                         failed_count += 1
+                        if manifest:
+                            manifest.record_failure(str(file), "Checksum verification failed")
                 except Exception as e:
                     logger.error(f"Failed to backup {file} to {backup_file}: {e}")
                     failed_count += 1
+                    if manifest:
+                        manifest.record_failure(str(file), str(e))
             else:
                 logger.info(f"Skipping unmodified file: {file} (modified at {file_mtime})")
+                if manifest:
+                    manifest.record_skip(str(file))
     if failed_count:
         logger.warning(f"Incremental backup completed with {failed_count} file error(s).")
 
@@ -332,16 +453,17 @@ def perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time
         body = f"Backup completed for {source_dir}"
         send_email(receiver_emails, subject, body, logger=logger)
 
-def perform_differential_backup(logger, source_dir, backup_dirs, last_full_backup_time, bot=None, receiver_emails=None):
+def perform_differential_backup(logger, source_dir, backup_dirs, last_full_backup_time,
+                                bot=None, receiver_emails=None, exclude_patterns=None,
+                                manifest=None):
     """
     Perform a differential backup of the source directory to the backup directories.
     """
     logger.info(f"Performing differential backup from {source_dir}")
-    files = list(Path(source_dir).rglob('*'))
+    files = [f for f in Path(source_dir).rglob('*')
+             if not f.is_dir() and not should_exclude(f.relative_to(source_dir), exclude_patterns)]
     failed_count = 0
     for file in tqdm(files, desc="Syncing Differential Files", unit="files"):
-        if file.is_dir():
-            continue
         if os.path.getmtime(file) > last_full_backup_time:
             for backup_dir in backup_dirs:
                 backup_file = Path(backup_dir) / file.relative_to(source_dir)
@@ -349,16 +471,27 @@ def perform_differential_backup(logger, source_dir, backup_dirs, last_full_backu
                     backup_file.parent.mkdir(parents=True, exist_ok=True)
                     if file.is_symlink():
                         handle_symlink(logger, str(file), str(backup_file))
+                        if manifest:
+                            manifest.record_copy(str(file), file.stat().st_size if file.exists() else 0)
                         continue
                     shutil.copy2(file, backup_file)
                     if verify_backup(file, backup_file):
                         logger.info(f"Differential backup of {file} to {backup_file}")
+                        if manifest:
+                            manifest.record_copy(str(file), file.stat().st_size)
                     else:
                         logger.error(f"Checksum verification failed for {file}")
                         failed_count += 1
+                        if manifest:
+                            manifest.record_failure(str(file), "Checksum verification failed")
                 except Exception as e:
                     logger.error(f"Failed to backup {file} to {backup_file}: {e}")
                     failed_count += 1
+                    if manifest:
+                        manifest.record_failure(str(file), str(e))
+        else:
+            if manifest:
+                manifest.record_skip(str(file))
     if failed_count:
         logger.warning(f"Differential backup completed with {failed_count} file error(s).")
 

@@ -5,7 +5,7 @@ from src.utils import is_valid_email
 
 def setup_argparse():
     """
-    Set up and  parse command-line arguments for the backup handler script.
+    Set up and parse command-line arguments for the backup handler script.
 
     Returns:
     - argparse.Namespace: A namespace populated with command-line arguments.
@@ -18,64 +18,71 @@ def setup_argparse():
     parser.add_argument(
         '--version',
         action='version',
-        version='backup-handler 1.5.0'
+        version='backup-handler 2.0.0'
     )
-    
+
     # Configuration file argument
-    parser.add_argument(
-        '--config', 
-        type=str, 
-        default='config/config.ini', 
-        help='Path to the configuration file (default: config.ini)'
+    config_group = parser.add_mutually_exclusive_group()
+    config_group.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        help='Path to the configuration file (default: config/config.ini)'
     )
-    
+    config_group.add_argument(
+        '--profile',
+        type=str,
+        default=None,
+        help='Load config profile by name (resolves to config/config.NAME.ini)'
+    )
+
     # Operation Modes Selection
     parser.add_argument(
-        '--operation-modes', 
-        nargs='+', 
-        choices=['local', 'ssh'], 
-        default=['local'], 
-        help='Select operation modes to run (default: local). Choices: local, ssh'
+        '--operation-modes',
+        nargs='+',
+        choices=['local', 'ssh', 's3'],
+        default=['local'],
+        help='Select operation modes to run (default: local). Choices: local, ssh, s3'
     )
-    
+
     # Directory and server overrides
     parser.add_argument(
         '--source-dir',
         type=str,
         help='Override the source directory from the configuration'
     )
-    parser.add_argument( 
-        '--backup-dirs', 
-        nargs='+', 
+    parser.add_argument(
+        '--backup-dirs',
+        nargs='+',
         help='Override the backup directories (space-separated list)'
     )
     parser.add_argument(
-        '--ssh-servers', 
-        nargs='+', 
+        '--ssh-servers',
+        nargs='+',
         help='Override the SSH servers for remote backups (space-separated list)'
     )
-    
+
     # Backup behavior options
     parser.add_argument(
-        '--backup-mode', 
-        type=str, 
-        choices=['full', 'incremental', 'differential'], 
+        '--backup-mode',
+        type=str,
+        choices=['full', 'incremental', 'differential'],
         help='Specify the type of backup. Choices: full, incremental, differential'
     )
     parser.add_argument(
-        '--show-setup', 
-        action='store_true', 
+        '--show-setup',
+        action='store_true',
         help='Display the current backup configuration and settings'
     )
-    
+
     # Compression options
     parser.add_argument(
-        '--compress', 
-        type=str, 
-        choices=['zip', 'zip_pw'], 
+        '--compress',
+        type=str,
+        choices=['zip', 'zip_pw'],
         help="Compress the source directory. Choices: 'zip' (normal zip), 'zip_pw' (password-protected zip)"
     )
-    
+
     # Scheduling options
     parser.add_argument(
         '--scheduled',
@@ -90,15 +97,63 @@ def setup_argparse():
         help='Show what would be done without actually copying or syncing any files'
     )
 
+    # Exclude patterns
+    parser.add_argument(
+        '--exclude',
+        type=str,
+        default=None,
+        help='Comma-separated glob patterns to exclude (e.g., "*.log,*.tmp,__pycache__/*"). Overrides config.'
+    )
+
+    # Status command
+    parser.add_argument(
+        '--status',
+        action='store_true',
+        help='Display backup status: last backup times, directory sizes, and latest manifest summary'
+    )
+
+    # Retention policy override
+    parser.add_argument(
+        '--retain',
+        type=int,
+        default=None,
+        help='Override max_count retention policy: keep only N most recent backups per directory'
+    )
+
+    # Restore options
+    parser.add_argument(
+        '--restore',
+        action='store_true',
+        help='Restore files from a backup directory or archive'
+    )
+    parser.add_argument(
+        '--from-dir',
+        type=str,
+        default=None,
+        help='Source backup directory or ZIP archive to restore from'
+    )
+    parser.add_argument(
+        '--to-dir',
+        type=str,
+        default=None,
+        help='Destination directory to restore files to'
+    )
+    parser.add_argument(
+        '--restore-timestamp',
+        type=str,
+        default=None,
+        help='Restore to a specific point in time (YYYYMMDD_HHMMSS format, uses manifests)'
+    )
+
     # Notifications option
     parser.add_argument(
-        '--notifications', 
-        action='store_true', 
+        '--notifications',
+        action='store_true',
         help='Enable notifications for backup operations'
     )
     parser.add_argument(
-        '--receiver', 
-        nargs='+', 
+        '--receiver',
+        nargs='+',
         help='List of email addresses to receive notifications (space-separated)'
     )
 
@@ -124,13 +179,23 @@ def validate_args(args, logger):
         logger.error("Source directory and backup directories must be specified when using --backup-mode.")
         sys.exit(1)
 
+    # --restore requires --from-dir and --to-dir
+    if args.restore and (not args.from_dir or not args.to_dir):
+        logger.error("--restore requires both --from-dir and --to-dir.")
+        sys.exit(1)
+
+    # --restore is mutually exclusive with --scheduled and --backup-mode
+    if args.restore and (args.scheduled or args.backup_mode):
+        logger.error("--restore cannot be used with --scheduled or --backup-mode.")
+        sys.exit(1)
+
     # Validate email addresses if --receiver is provided
     if args.receiver:
         for email in args.receiver:
             if not is_valid_email(email):
                 logger.error(f"Invalid email address: {email}")
                 sys.exit(1)
-    
+
     # Warn if both local and ssh modes are selected
     if 'local' in args.operation_modes and 'ssh' in args.operation_modes:
         logger.warning("Both 'local' and 'ssh' operation modes selected. Ensure that both are intended to run concurrently.")
