@@ -411,14 +411,14 @@ def _notify(logger, telegram_bot, notifications, message, config_values=None):
                 logger.error(f"Failed to send SMTP notification: {e}")
 
 
-def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn):
+def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn, config_values=None):
     """Run a backup function with standard notification and error handling."""
     try:
         backup_fn()
-        _notify(logger, telegram_bot, notifications, f"Local {mode_name} backup completed.")
+        _notify(logger, telegram_bot, notifications, f"Local {mode_name} backup completed.", config_values=config_values)
     except Exception as e:
         logger.error(f"{mode_name.capitalize()} backup failed: {e}")
-        _notify(logger, telegram_bot, notifications, f"{mode_name.capitalize()} backup failed.")
+        _notify(logger, telegram_bot, notifications, f"{mode_name.capitalize()} backup failed.", config_values=config_values)
 
 
 def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None,
@@ -504,7 +504,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                                                            last_backup_time, bot=telegram_bot,
                                                            receiver_emails=receiver,
                                                            exclude_patterns=exclude_patterns,
-                                                           manifest=manifest))
+                                                           manifest=manifest),
+                        config_values=config_values)
         elif backup_mode == 'differential':
             if compress:
                 logger.error("Invalid option for differential backup.")
@@ -515,7 +516,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                                                             last_full_backup_time, bot=telegram_bot,
                                                             receiver_emails=receiver,
                                                             exclude_patterns=exclude_patterns,
-                                                            manifest=manifest))
+                                                            manifest=manifest),
+                        config_values=config_values)
         else:
             _notify(logger, telegram_bot, notifications, "Starting full backup...",
                     config_values=config_values)
@@ -525,7 +527,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                                                      receiver_emails=receiver,
                                                      exclude_patterns=exclude_patterns,
                                                      manifest=manifest,
-                                                     parallel_copies=parallel_copies))
+                                                     parallel_copies=parallel_copies),
+                        config_values=config_values)
             update_last_full_backup_time()
 
     if operation_modes and ('ssh' in operation_modes):
