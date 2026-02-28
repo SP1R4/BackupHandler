@@ -37,6 +37,16 @@ from src.retention import cleanup_old_backups
 from src.restore import restore_backup
 # Import S3 sync
 from src.s3_sync import sync_to_s3
+# Import encryption
+from src.encryption import encrypt_directory, decrypt_directory
+# Import database sync
+from src.db_sync import perform_db_backup
+# Import verification
+from src.verify import verify_backup_integrity, print_verify_report
+# Import SMTP email notifications
+from src.email_notify import send_smtp_email
+# Import deduplication
+from src.dedup import deduplicate_backup_dirs
 
 
 _PROJECT_ROOT = Path(__file__).parent
@@ -184,11 +194,43 @@ def main():
         show_status(logger, config_path)
         return
 
+    # Handle --verify early exit
+    if args.verify:
+        try:
+            verify_config = extract_config_values(logger, config_path, skip_validation=True)
+        except Exception:
+            verify_config = {}
+        backup_dirs = args.backup_dirs or verify_config.get('backup_dirs', [])
+        if not backup_dirs:
+            logger.error("No backup directories to verify. Specify --backup-dirs or configure [BACKUPS] backup_dirs.")
+            sys.exit(1)
+        enc_passphrase = verify_config.get('encryption_passphrase')
+        enc_key_file = verify_config.get('encryption_key_file')
+        results = verify_backup_integrity(logger, backup_dirs,
+                                          encryption_passphrase=enc_passphrase,
+                                          encryption_key_file=enc_key_file)
+        all_ok = print_verify_report(results)
+        sys.exit(0 if all_ok else 1)
+
     # Handle --restore early exit
     if args.restore:
+        # Load config to get encryption/SSH/S3 params for restore
+        try:
+            restore_config = extract_config_values(logger, config_path, skip_validation=True)
+        except Exception:
+            restore_config = {}
+        enc_passphrase = restore_config.get('encryption_passphrase')
+        enc_key_file = restore_config.get('encryption_key_file')
+
         logger.info(f"Restoring from {args.from_dir} to {args.to_dir}")
         success = restore_backup(logger, args.from_dir, args.to_dir,
-                                 timestamp=args.restore_timestamp)
+                                 timestamp=args.restore_timestamp,
+                                 encryption_passphrase=enc_passphrase,
+                                 encryption_key_file=enc_key_file,
+                                 ssh_password=restore_config.get('ssh_password'),
+                                 s3_region=restore_config.get('s3_region'),
+                                 s3_access_key=restore_config.get('s3_access_key'),
+                                 s3_secret_key=restore_config.get('s3_secret_key'))
         if success:
             logger.info("Restore completed successfully.")
             print("Restore completed successfully.")
@@ -242,7 +284,9 @@ def main():
                          dry_run=args.dry_run,
                          exclude_patterns=exclude_patterns,
                          retain=args.retain,
-                         config_path=config_path)
+                         config_path=config_path,
+                         encrypt=args.encrypt,
+                         dedup=args.dedup)
 
 def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns=None,
                         retain=None):
@@ -308,6 +352,8 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
                     operation_modes.append('ssh')
                 if config_values.get('s3_mode'):
                     operation_modes.append('s3')
+                if config_values.get('db_mode'):
+                    operation_modes.append('db')
                 backup_operation(logger,
                                  source_dir=config_values['source_dir'],
                                  backup_dirs=config_values['backup_dirs'],
@@ -335,13 +381,34 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
         logger.error(f"Error in scheduled_operation: {e}")
         sys.exit(1)
 
-def _notify(logger, telegram_bot, notifications, message):
-    """Send a Telegram notification if bot is available and notifications are enabled."""
+def _notify(logger, telegram_bot, notifications, message, config_values=None):
+    """Send notifications via Telegram and/or SMTP if configured."""
     if notifications and telegram_bot:
         try:
             telegram_bot.send_notification(message)
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")
+
+    # SMTP email notification
+    if config_values:
+        smtp_host = config_values.get('smtp_host')
+        smtp_to = config_values.get('smtp_to', [])
+        if smtp_host and smtp_to:
+            try:
+                send_smtp_email(
+                    logger,
+                    smtp_host=smtp_host,
+                    smtp_port=config_values.get('smtp_port', 587),
+                    smtp_user=config_values.get('smtp_user'),
+                    smtp_password=config_values.get('smtp_password'),
+                    from_addr=config_values.get('smtp_from', config_values.get('smtp_user', '')),
+                    to_addrs=smtp_to,
+                    subject=f"Backup Handler: {message[:50]}",
+                    body=message,
+                    use_tls=config_values.get('smtp_tls', True),
+                )
+            except Exception as e:
+                logger.error(f"Failed to send SMTP notification: {e}")
 
 
 def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn):
@@ -359,7 +426,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                      receiver=None, show_setup=False, notifications=False,
                      telegram_bot=None, ssh_username=None, ssh_password=None,
                      dry_run=False, exclude_patterns=None, retain=None,
-                     config_path=None, config_values=None):
+                     config_path=None, config_values=None, encrypt=False, dedup=False):
 
     # Show setup command (skip validation so incomplete configs can be inspected)
     if show_setup:
@@ -405,7 +472,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
     if pre_hook:
         if not run_hook(logger, pre_hook, 'pre_backup'):
             logger.error("Pre-backup hook failed. Aborting backup.")
-            _notify(logger, telegram_bot, notifications, "Backup aborted: pre-backup hook failed.")
+            _notify(logger, telegram_bot, notifications, "Backup aborted: pre-backup hook failed.",
+                    config_values=config_values)
             return
 
     # Create manifest for this backup run
@@ -449,7 +517,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                                                             exclude_patterns=exclude_patterns,
                                                             manifest=manifest))
         else:
-            _notify(logger, telegram_bot, notifications, "Starting full backup...")
+            _notify(logger, telegram_bot, notifications, "Starting full backup...",
+                    config_values=config_values)
             _run_backup(logger, telegram_bot, notifications, "full",
                         lambda: perform_full_backup(logger, source_dir, backup_dirs,
                                                      compress=compress, bot=telegram_bot,
@@ -466,7 +535,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             logger.info(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {ssh_servers}")
             print(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {', '.join(ssh_servers)}")
         else:
-            _notify(logger, telegram_bot, notifications, "Starting SSH backup...")
+            _notify(logger, telegram_bot, notifications, "Starting SSH backup...",
+                    config_values=config_values)
             logger.info("Running SSH backup...")
             try:
                 sync_ssh_servers_concurrently(source_dir, ssh_servers, username=ssh_username or '',
@@ -474,10 +544,12 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                                               exclude_patterns=exclude_patterns,
                                               manifest=manifest,
                                               bandwidth_limit=bandwidth_limit)
-                _notify(logger, telegram_bot, notifications, "SSH backup completed.")
+                _notify(logger, telegram_bot, notifications, "SSH backup completed.",
+                        config_values=config_values)
             except Exception as e:
                 logger.error(f"SSH backup failed: {e}")
-                _notify(logger, telegram_bot, notifications, "SSH backup failed.")
+                _notify(logger, telegram_bot, notifications, "SSH backup failed.",
+                        config_values=config_values)
 
     if operation_modes and ('s3' in operation_modes):
         if not s3_bucket:
@@ -486,19 +558,53 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             logger.info(f"[DRY RUN] Would sync '{source_dir}' to s3://{s3_bucket}/{s3_prefix}")
             print(f"[DRY RUN] Would sync '{source_dir}' to s3://{s3_bucket}/{s3_prefix}")
         else:
-            _notify(logger, telegram_bot, notifications, "Starting S3 backup...")
+            _notify(logger, telegram_bot, notifications, "Starting S3 backup...",
+                    config_values=config_values)
             logger.info("Running S3 backup...")
             try:
                 sync_to_s3(logger, source_dir, s3_bucket, prefix=s3_prefix,
                            region=s3_region, access_key=s3_access_key,
                            secret_key=s3_secret_key, mode=backup_mode or 'full',
                            exclude_patterns=exclude_patterns, manifest=manifest)
-                _notify(logger, telegram_bot, notifications, "S3 backup completed.")
+                _notify(logger, telegram_bot, notifications, "S3 backup completed.",
+                        config_values=config_values)
             except Exception as e:
                 logger.error(f"S3 backup failed: {e}")
-                _notify(logger, telegram_bot, notifications, "S3 backup failed.")
+                _notify(logger, telegram_bot, notifications, "S3 backup failed.",
+                        config_values=config_values)
+
+    if operation_modes and ('db' in operation_modes):
+        db_database = config_values.get('db_database')
+        if not db_database:
+            logger.warning("DB mode selected but no database configured in [DATABASE]. Skipping database backup.")
+        elif dry_run:
+            perform_db_backup(logger, config_values, backup_dirs or [], manifest, dry_run=True)
+        else:
+            _notify(logger, telegram_bot, notifications, "Starting database backup...",
+                    config_values=config_values)
+            logger.info("Running database backup...")
+            try:
+                success = perform_db_backup(logger, config_values, backup_dirs or [], manifest)
+                if success:
+                    _notify(logger, telegram_bot, notifications, "Database backup completed.",
+                            config_values=config_values)
+                else:
+                    _notify(logger, telegram_bot, notifications, "Database backup failed.",
+                            config_values=config_values)
+            except Exception as e:
+                logger.error(f"Database backup failed: {e}")
+                _notify(logger, telegram_bot, notifications, "Database backup failed.",
+                        config_values=config_values)
 
     if dry_run:
+        # Show encryption info in dry-run
+        dry_encrypt = encrypt or config_values.get('encryption_enabled', False)
+        if dry_encrypt:
+            enc_method = 'key_file' if config_values.get('encryption_key_file') else 'passphrase'
+            print(f"[DRY RUN] Would encrypt backup files using AES-256-GCM ({enc_method})")
+        dry_dedup = dedup or config_values.get('dedup_enabled', False)
+        if dry_dedup:
+            print("[DRY RUN] Would deduplicate identical files using hardlinks")
         logger.info("[DRY RUN] Complete. No files were modified.")
         print("\n[DRY RUN] Complete. No files were modified.")
         return
@@ -512,6 +618,34 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             except Exception as e:
                 logger.error(f"Failed to save manifest to {bdir}: {e}")
 
+    # Encrypt backup files (after manifest save, before retention)
+    encryption_enabled = encrypt or config_values.get('encryption_enabled', False)
+    enc_passphrase = config_values.get('encryption_passphrase')
+    enc_key_file = config_values.get('encryption_key_file')
+
+    if encryption_enabled and backup_dirs:
+        if not enc_passphrase and not enc_key_file:
+            logger.error("Encryption enabled but no passphrase or key_file configured in [ENCRYPTION].")
+        else:
+            for bdir in backup_dirs:
+                try:
+                    count = encrypt_directory(bdir, passphrase=enc_passphrase,
+                                              key_file=enc_key_file, logger=logger)
+                    logger.info(f"Encrypted {count} files in {bdir}")
+                except Exception as e:
+                    logger.error(f"Encryption failed for {bdir}: {e}")
+
+    # Deduplicate backup files (after encryption, before retention)
+    dedup_enabled = dedup or config_values.get('dedup_enabled', False)
+    if dedup_enabled and backup_dirs:
+        try:
+            dedup_result = deduplicate_backup_dirs(logger, backup_dirs)
+            if dedup_result['duplicates_found'] > 0:
+                logger.info(f"Dedup: {dedup_result['duplicates_found']} duplicates, "
+                            f"{dedup_result['bytes_saved']} bytes saved")
+        except Exception as e:
+            logger.error(f"Deduplication failed: {e}")
+
     # Update the backup timestamp after successful execution
     update_last_backup_time()
 
@@ -524,7 +658,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
         if not run_hook(logger, post_hook, 'post_backup'):
             logger.warning("Post-backup hook failed (backup itself succeeded).")
 
-    _notify(logger, telegram_bot, notifications, "All backup operations completed successfully.")
+    _notify(logger, telegram_bot, notifications, "All backup operations completed successfully.",
+            config_values=config_values)
 
 if __name__ == "__main__":
     main()

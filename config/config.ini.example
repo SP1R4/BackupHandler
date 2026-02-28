@@ -21,6 +21,7 @@ ssh_servers = None
 # OPTIONAL: SSH username (required if ssh mode is True)
 username = None
 # OPTIONAL: SSH password (required if ssh mode is True)
+# Supports env var syntax: password = ${SSH_PASSWORD}
 password = None
 # OPTIONAL: Bandwidth limit for SFTP uploads in KB/s (0 = unlimited)
 bandwidth_limit = 0
@@ -33,9 +34,55 @@ prefix =
 # OPTIONAL: AWS region (required if s3 mode is True)
 region = None
 # OPTIONAL: AWS access key (uses default credentials if not set)
+# Supports env var syntax: access_key = ${AWS_ACCESS_KEY_ID}
 access_key = None
 # OPTIONAL: AWS secret key (uses default credentials if not set)
+# Supports env var syntax: secret_key = ${AWS_SECRET_ACCESS_KEY}
 secret_key = None
+
+[ENCRYPTION]
+# OPTIONAL: Enable AES-256-GCM encryption at rest for backup files (True/False)
+enabled = False
+# OPTIONAL: Path to a 32-byte raw key file (takes priority over passphrase)
+key_file = None
+# OPTIONAL: Passphrase for key derivation (PBKDF2-HMAC-SHA256, 600k iterations)
+# Supports env var syntax: passphrase = ${BACKUP_ENCRYPTION_PASSPHRASE}
+passphrase = None
+
+[DATABASE]
+# OPTIONAL: MySQL database user (required if db mode is True)
+user = None
+# OPTIONAL: MySQL database password (required if db mode is True)
+# Supports env var syntax: password = ${DB_PASSWORD}
+password = None
+# OPTIONAL: MySQL database name (required if db mode is True)
+database = None
+# OPTIONAL: MySQL host (default: localhost)
+host = localhost
+# OPTIONAL: MySQL port (default: 3306)
+port = 3306
+
+[SMTP]
+# OPTIONAL: SMTP server hostname for email notifications
+host = None
+# OPTIONAL: SMTP server port (default: 587 for STARTTLS)
+port = 587
+# OPTIONAL: SMTP authentication username
+# Supports env var syntax: user = ${SMTP_USER}
+user = None
+# OPTIONAL: SMTP authentication password
+# Supports env var syntax: password = ${SMTP_PASSWORD}
+password = None
+# OPTIONAL: Sender email address (defaults to SMTP user)
+from_addr = None
+# OPTIONAL: Comma-separated recipient email addresses
+to_addrs = None
+# OPTIONAL: Use STARTTLS (True/False, default: True)
+use_tls = True
+
+[DEDUP]
+# OPTIONAL: Enable file-level deduplication using hardlinks (True/False)
+enabled = False
 
 [SCHEDULE]
 # REQUIRED (for --scheduled mode): Comma-separated times in HH:MM (24-hour) format
@@ -50,6 +97,8 @@ local = True
 ssh = False
 # OPTIONAL: Enable S3 cloud backups (True/False)
 s3 = False
+# OPTIONAL: Enable MySQL database dumps (True/False)
+db = False
 
 [HOOKS]
 # OPTIONAL: Shell command to run before backup (non-zero exit aborts the backup)
