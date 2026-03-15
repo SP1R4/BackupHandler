@@ -1,10 +1,39 @@
+"""
+dedup.py - File-Level Backup Deduplication
+
+Eliminates duplicate files across backup directories by replacing identical
+copies with filesystem hardlinks, reclaiming disk space without losing data.
+
+Deduplication runs in two passes:
+  1. Within-directory  - Finds and hardlinks duplicates inside each backup dir.
+  2. Cross-directory   - Links matching files across directories on the same
+                         filesystem (hardlinks cannot span mount points).
+
+Files are identified by their SHA-256 content hash. Manifest JSON files and
+encrypted ``.enc`` files are excluded (encrypted files use unique nonces, so
+identical plaintext produces different ciphertext).
+"""
+
 import os
 import hashlib
 from pathlib import Path
+from tqdm import tqdm
 
 
 def _file_hash(file_path, chunk_size=8192):
-    """Calculate SHA-256 hash of a file."""
+    """
+    Calculate the SHA-256 content hash of a file.
+
+    Reads the file in 8 KB chunks to handle large files without excessive
+    memory usage.
+
+    Parameters:
+        file_path (str or Path): Path to the file to hash.
+        chunk_size (int): Read buffer size in bytes (default: 8192).
+
+    Returns:
+        str: Hex-encoded SHA-256 digest.
+    """
     sha256 = hashlib.sha256()
     with open(file_path, 'rb') as f:
         for chunk in iter(lambda: f.read(chunk_size), b""):
@@ -30,21 +59,18 @@ def deduplicate_directory(logger, directory):
         logger.warning(f"Dedup directory does not exist: {directory}")
         return {'files_checked': 0, 'duplicates_found': 0, 'bytes_saved': 0}
 
-    hash_to_path = {}  # hash -> first file path with that hash
+    # Map: content hash -> path of the first file with that hash (the "original")
+    hash_to_path = {}
     files_checked = 0
     duplicates_found = 0
     bytes_saved = 0
 
-    for file in sorted(directory.rglob('*')):
-        if not file.is_file() or file.is_symlink():
-            continue
-        # Skip manifests
-        if file.name.startswith('backup_manifest_') and file.suffix == '.json':
-            continue
-        # Skip encrypted files (different nonce = different hash even for same content)
-        if file.suffix == '.enc':
-            continue
+    all_files = [f for f in sorted(directory.rglob('*'))
+                 if f.is_file() and not f.is_symlink()
+                 and not (f.name.startswith('backup_manifest_') and f.suffix == '.json')
+                 and f.suffix != '.enc']
 
+    for file in tqdm(all_files, desc=f"Dedup {directory.name}", unit="files"):
         files_checked += 1
 
         try:
@@ -135,7 +161,20 @@ def deduplicate_backup_dirs(logger, backup_dirs):
 
 
 def _cross_directory_dedup(logger, backup_dirs):
-    """Deduplicate identical files across directories using hardlinks (same filesystem only)."""
+    """
+    Deduplicate identical files across multiple backup directories.
+
+    Groups directories by filesystem device (``st_dev``) since hardlinks
+    cannot span mount points. Builds a hash index from the first directory
+    in each group, then hardlinks matching files from subsequent directories.
+
+    Parameters:
+        logger: Logger instance.
+        backup_dirs (list): Backup directory paths.
+
+    Returns:
+        dict: ``{'duplicates_found': int, 'bytes_saved': int}``.
+    """
     result = {'duplicates_found': 0, 'bytes_saved': 0}
 
     # Group directories by filesystem device

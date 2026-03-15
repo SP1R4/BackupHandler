@@ -1,3 +1,7 @@
+[META]
+# Schema version — used to detect config file compatibility after upgrades
+schema_version = 3
+
 [DEFAULT]
 # REQUIRED: Absolute path to the directory you want to back up
 source_dir = /path/to/source
@@ -39,6 +43,12 @@ access_key = None
 # OPTIONAL: AWS secret key (uses default credentials if not set)
 # Supports env var syntax: secret_key = ${AWS_SECRET_ACCESS_KEY}
 secret_key = None
+# OPTIONAL: Maximum upload bandwidth in KB/s (0 = unlimited)
+max_bandwidth = 0
+# OPTIONAL: Multipart upload threshold in MB (default: 8)
+multipart_threshold = 8
+# OPTIONAL: Maximum concurrent upload threads (default: 10)
+max_concurrency = 10
 
 [ENCRYPTION]
 # OPTIONAL: Enable AES-256-GCM encryption at rest for backup files (True/False)
@@ -48,6 +58,8 @@ key_file = None
 # OPTIONAL: Passphrase for key derivation (PBKDF2-HMAC-SHA256, 600k iterations)
 # Supports env var syntax: passphrase = ${BACKUP_ENCRYPTION_PASSPHRASE}
 passphrase = None
+# OPTIONAL: Number of parallel encryption/decryption threads (default: 1)
+workers = 1
 
 [DATABASE]
 # OPTIONAL: MySQL database user (required if db mode is True)
@@ -61,6 +73,10 @@ database = None
 host = localhost
 # OPTIONAL: MySQL port (default: 3306)
 port = 3306
+# OPTIONAL: Use --single-transaction for InnoDB consistent snapshots (default: True)
+single_transaction = True
+# OPTIONAL: Record binary log position in dump for point-in-time recovery (default: False)
+binlog_position = False
 
 [SMTP]
 # OPTIONAL: SMTP server hostname for email notifications
@@ -111,6 +127,13 @@ post_backup = None
 max_age_days = 0
 # OPTIONAL: Keep only the N most recent backups per directory (0 = unlimited)
 max_count = 0
+
+[WEBHOOK]
+# OPTIONAL: Webhook URL for notifications (Slack, Discord, Teams, or custom)
+url = None
+# OPTIONAL: Authorization header value (e.g., "Bearer YOUR_TOKEN")
+# Supports env var syntax: auth_header = ${WEBHOOK_AUTH_TOKEN}
+auth_header = None
 
 [NOTIFICATIONS]
 # OPTIONAL: Enable Telegram bot notifications (True/False)

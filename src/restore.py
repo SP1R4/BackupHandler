@@ -1,3 +1,17 @@
+"""
+restore.py - Multi-Source Backup Restore Engine
+
+Restores backup data from multiple source types:
+  - Local directories  (direct file copy with SHA-256 verification)
+  - ZIP archives       (standard extraction)
+  - SSH/SFTP remotes   (download via paramiko, then local restore)
+  - S3 buckets         (download via boto3, then local restore)
+
+Supports encrypted backups (auto-detects ``.enc`` files and decrypts to a
+temp directory), symlink preservation, and point-in-time restore using
+manifest history.
+"""
+
 import os
 import re
 import stat
@@ -10,18 +24,29 @@ from .manifest import load_manifests_up_to
 from .encryption import decrypt_directory
 
 
+# ─── Remote Path Detection & Parsing ────────────────────────────────────────
+
 def _is_ssh_path(path):
-    """Check if path looks like user@host:/path or ssh://user@host/path."""
+    """Check if a path matches SSH syntax (``user@host:/path`` or ``ssh://...``)."""
     return bool(re.match(r'^[\w.-]+@[\w.-]+:.+', path) or path.startswith('ssh://'))
 
 
 def _is_s3_path(path):
-    """Check if path looks like s3://bucket/prefix."""
+    """Check if a path matches S3 URI syntax (``s3://bucket/prefix``)."""
     return path.startswith('s3://')
 
 
 def _parse_ssh_path(path):
-    """Parse user@host:/remote/path into (user, host, remote_path)."""
+    """
+    Parse an SSH path into its components.
+
+    Supports two formats:
+      - ``user@host:/remote/path``
+      - ``ssh://user@host/remote/path``
+
+    Returns:
+        tuple: ``(user, host, remote_path)`` where user may be None.
+    """
     if path.startswith('ssh://'):
         # ssh://user@host/path
         path = path[6:]
@@ -42,7 +67,14 @@ def _parse_ssh_path(path):
 
 
 def _parse_s3_path(path):
-    """Parse s3://bucket/prefix into (bucket, prefix)."""
+    """
+    Parse an S3 URI into bucket and prefix components.
+
+    Example: ``s3://my-bucket/backups/daily`` -> ``('my-bucket', 'backups/daily')``
+
+    Returns:
+        tuple: ``(bucket, prefix)`` where prefix may be empty.
+    """
     stripped = path[5:]  # remove s3://
     if '/' in stripped:
         bucket, prefix = stripped.split('/', 1)
@@ -51,8 +83,25 @@ def _parse_s3_path(path):
     return bucket, prefix
 
 
+
+# ─── Remote Download Handlers ───────────────────────────────────────────────
+
 def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
-    """Download a remote directory via SFTP to a local directory."""
+    """
+    Download an entire remote directory via SFTP to a local directory.
+
+    Uses ``paramiko.WarningPolicy`` for host key verification to avoid
+    silently accepting unknown hosts while not failing outright.
+
+    Parameters:
+        logger: Logger instance.
+        ssh_path (str): SSH path (``user@host:/path`` or ``ssh://...``).
+        local_dir (str): Local directory to download files into.
+        ssh_password (str, optional): SSH password for authentication.
+
+    Returns:
+        bool: True if download completed successfully.
+    """
     try:
         import paramiko
     except ImportError:
@@ -84,7 +133,12 @@ def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
 
 
 def _sftp_download_recursive(sftp, remote_dir, local_dir, logger):
-    """Recursively download a remote directory via SFTP."""
+    """
+    Recursively download all files and subdirectories from a remote SFTP path.
+
+    Creates the local directory structure as needed and logs each file transfer.
+    Individual file failures are logged but do not abort the overall download.
+    """
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,7 +164,24 @@ def _sftp_download_recursive(sftp, remote_dir, local_dir, logger):
 
 def _download_from_s3(logger, s3_path, local_dir, region=None,
                       access_key=None, secret_key=None):
-    """Download files from an S3 prefix to a local directory."""
+    """
+    Download all objects under an S3 prefix to a local directory.
+
+    Uses the S3 paginator API to handle buckets with more than 1,000 objects.
+    The local directory structure mirrors the S3 key hierarchy relative to
+    the specified prefix.
+
+    Parameters:
+        logger: Logger instance.
+        s3_path (str): S3 URI (``s3://bucket/prefix``).
+        local_dir (str): Local directory to download files into.
+        region (str, optional): AWS region name.
+        access_key (str, optional): AWS access key ID.
+        secret_key (str, optional): AWS secret access key.
+
+    Returns:
+        bool: True if download completed successfully.
+    """
     try:
         import boto3
     except ImportError:
@@ -164,7 +235,7 @@ def _download_from_s3(logger, s3_path, local_dir, region=None,
 def restore_backup(logger, from_dir, to_dir, timestamp=None,
                    encryption_passphrase=None, encryption_key_file=None,
                    ssh_password=None, s3_region=None, s3_access_key=None,
-                   s3_secret_key=None):
+                   s3_secret_key=None, dry_run=False):
     """
     Restore files from a local, SSH, or S3 backup source.
 
@@ -184,6 +255,11 @@ def restore_backup(logger, from_dir, to_dir, timestamp=None,
     - bool: True if restore completed successfully, False otherwise.
     """
     to_path = Path(to_dir)
+
+    # Dry-run: show what would be restored without modifying anything
+    if dry_run:
+        return _dry_run_restore(logger, from_dir, to_dir, timestamp)
+
     to_path.mkdir(parents=True, exist_ok=True)
 
     # Remote SSH restore
@@ -245,8 +321,51 @@ def restore_backup(logger, from_dir, to_dir, timestamp=None,
     return False
 
 
+
+def _dry_run_restore(logger, from_dir, to_dir, timestamp):
+    """Show what a restore would do without modifying any files."""
+    print(f"[DRY RUN] Restore preview:")
+    print(f"  Source:      {from_dir}")
+    print(f"  Destination: {to_dir}")
+
+    if _is_ssh_path(from_dir):
+        print(f"  Type:        SSH remote download + local restore")
+    elif _is_s3_path(from_dir):
+        print(f"  Type:        S3 download + local restore")
+    else:
+        from_path = Path(from_dir)
+        if from_path.is_file() and from_path.suffix == '.zip':
+            print(f"  Type:        ZIP archive extraction")
+        elif from_path.is_dir():
+            files = [f for f in from_path.rglob('*') if f.is_file()
+                     and not (f.name.startswith('backup_manifest_') and f.suffix == '.json')]
+            enc_count = sum(1 for f in files if f.suffix == '.enc')
+            print(f"  Type:        Directory restore")
+            print(f"  Files:       {len(files)}")
+            if enc_count:
+                print(f"  Encrypted:   {enc_count} files")
+        else:
+            print(f"  Type:        Unknown source")
+
+    if timestamp:
+        print(f"  Timestamp:   {timestamp} (point-in-time restore)")
+
+    logger.info(f"[DRY RUN] Would restore from {from_dir} to {to_dir}")
+    print("\n[DRY RUN] No files were modified.")
+    return True
+
+
+# ─── Local Restore Handlers ─────────────────────────────────────────────────
+
 def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase, encryption_key_file):
-    """Handle local restore with encryption detection (used by SSH/S3 after download)."""
+    """
+    Perform a local restore with automatic encrypted file detection.
+
+    Used as the final restore step after SSH/S3 downloads. Decrypts ``.enc``
+    files in-place (within the temp download directory) if encryption
+    credentials are available, then delegates to full-directory or
+    manifest-based restore.
+    """
     has_enc_files = any(from_path.rglob('*.enc'))
     if has_enc_files and (encryption_passphrase or encryption_key_file):
         logger.info("Encrypted files detected in downloaded backup. Decrypting before restore.")
@@ -262,7 +381,17 @@ def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase,
 
 
 def _restore_from_zip(logger, zip_path, to_dir):
-    """Extract a ZIP archive to the destination directory."""
+    """
+    Restore a backup from a ZIP archive by extracting all contents.
+
+    Parameters:
+        logger: Logger instance.
+        zip_path (Path): Path to the ZIP archive.
+        to_dir (Path): Destination directory for extraction.
+
+    Returns:
+        bool: True if extraction succeeded.
+    """
     logger.info(f"Restoring from ZIP archive: {zip_path}")
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -278,7 +407,21 @@ def _restore_from_zip(logger, zip_path, to_dir):
 
 
 def _restore_full_directory(logger, from_dir, to_dir):
-    """Full reverse copy from backup directory to destination with verification."""
+    """
+    Perform a full restore by copying all files from the backup to the destination.
+
+    Each file is verified with SHA-256 checksums after copy. Symlinks are
+    preserved as links rather than being dereferenced. Manifest JSON files
+    are excluded from the restore.
+
+    Parameters:
+        logger: Logger instance.
+        from_dir (Path): Source backup directory.
+        to_dir (Path): Destination restore directory.
+
+    Returns:
+        bool: True if all files were restored without errors.
+    """
     logger.info(f"Restoring full directory: {from_dir} -> {to_dir}")
     files = [f for f in from_dir.rglob('*') if f.is_file()
              and not (f.name.startswith('backup_manifest_') and f.suffix == '.json')]
@@ -319,8 +462,21 @@ def _restore_full_directory(logger, from_dir, to_dir):
 
 def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
     """
-    Restore using manifests up to a specific timestamp.
-    Applies manifests in chronological order to reconstruct state at that point.
+    Restore files to a specific point in time using manifest history.
+
+    Loads all manifests up to the given timestamp in chronological order
+    and builds a consolidated file list where the latest version of each
+    file wins. This reconstructs the backup state as it existed at the
+    specified timestamp.
+
+    Parameters:
+        logger: Logger instance.
+        from_dir (Path): Source backup directory containing manifests.
+        to_dir (Path): Destination restore directory.
+        timestamp (str): Cutoff timestamp in YYYYMMDD_HHMMSS format.
+
+    Returns:
+        bool: True if all files were restored without errors.
     """
     logger.info(f"Restoring with manifests up to timestamp: {timestamp}")
     manifests = load_manifests_up_to(from_dir, timestamp)

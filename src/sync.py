@@ -9,7 +9,7 @@ from pathlib import Path
 from retrying import retry
 from email_nots.email import send_email
 from .compression import compress_directory
-from .utils import verify_backup, generate_otp, handle_symlink, should_exclude
+from .utils import verify_backup, generate_otp, handle_symlink, should_exclude, calculate_checksum
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -114,7 +114,8 @@ def _copy_single_file(logger, file, src_dir, backup_dir, manifest):
         if verify_backup(file, backup_file):
             logger.info(f"Successfully backed up {file} to {backup_file}") if logger else print(f"Successfully backed up {file} to {backup_file}")
             if manifest:
-                manifest.record_copy(str(file), file.stat().st_size)
+                checksum = calculate_checksum(str(file))
+                manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
         else:
             logger.error(f"Checksum verification failed for {file}") if logger else print(f"Checksum verification failed for {file}")
             if manifest:
@@ -208,7 +209,8 @@ def _sftp_upload_directory(sftp, local_path, remote_path, mode='full', logger=No
                 if logger:
                     logger.info(f"Uploaded {local_file} -> {remote_file}")
                 if manifest:
-                    manifest.record_copy(str(local_file), local_file.stat().st_size)
+                    checksum = calculate_checksum(str(local_file))
+                    manifest.record_copy(str(local_file), local_file.stat().st_size, checksum=checksum)
             except Exception as e:
                 if logger:
                     logger.error(f"Failed to upload {local_file}: {e}")
@@ -428,7 +430,8 @@ def perform_incremental_backup(logger, source_dir, backup_dirs, last_backup_time
                     if verify_backup(file, backup_file):
                         logger.info(f"Incremental backup of {file} to {backup_file}")
                         if manifest:
-                            manifest.record_copy(str(file), file.stat().st_size)
+                            checksum = calculate_checksum(str(file))
+                            manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
                     else:
                         logger.error(f"Checksum verification failed for {file}")
                         failed_count += 1
@@ -478,7 +481,8 @@ def perform_differential_backup(logger, source_dir, backup_dirs, last_full_backu
                     if verify_backup(file, backup_file):
                         logger.info(f"Differential backup of {file} to {backup_file}")
                         if manifest:
-                            manifest.record_copy(str(file), file.stat().st_size)
+                            checksum = calculate_checksum(str(file))
+                            manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
                     else:
                         logger.error(f"Checksum verification failed for {file}")
                         failed_count += 1

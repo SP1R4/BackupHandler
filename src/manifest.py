@@ -1,3 +1,18 @@
+"""
+manifest.py - Backup Manifest Tracking
+
+Records per-file backup operations (copied, skipped, failed) and writes
+a timestamped JSON manifest to each backup directory. Manifests enable:
+  - Backup verification (compare files against recorded checksums/sizes)
+  - Point-in-time restore (replay manifests chronologically)
+  - Status dashboard (display latest backup summary)
+  - Incremental/differential tracking (know which files changed)
+
+Manifest files are named ``backup_manifest_YYYYMMDD_HHMMSS.json`` and are
+excluded from encryption and deduplication to remain accessible without
+decryption keys.
+"""
+
 import json
 import time
 from pathlib import Path
@@ -24,9 +39,12 @@ class BackupManifest:
         self._failed = []
         self._total_bytes = 0
 
-    def record_copy(self, file_path, size_bytes):
-        """Record a successfully copied file."""
-        self._copied.append({'path': str(file_path), 'size': size_bytes})
+    def record_copy(self, file_path, size_bytes, checksum=None):
+        """Record a successfully copied file with optional SHA-256 checksum."""
+        entry = {'path': str(file_path), 'size': size_bytes}
+        if checksum:
+            entry['checksum'] = checksum
+        self._copied.append(entry)
         self._total_bytes += size_bytes
 
     def record_skip(self, file_path):

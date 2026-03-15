@@ -1,3 +1,12 @@
+"""
+argparse_setup.py - CLI Argument Parsing and Validation
+
+Defines all command-line arguments for the backup handler, including backup
+modes, compression, encryption, deduplication, restore, verification, and
+scheduling options. Validates mutually exclusive flags and argument
+dependencies after parsing.
+"""
+
 import sys
 import argparse
 from src.utils import is_valid_email
@@ -5,10 +14,12 @@ from src.utils import is_valid_email
 
 def setup_argparse():
     """
-    Set up and parse command-line arguments for the backup handler script.
+    Define, parse, and return all CLI arguments.
+
+    Displays help and exits if no arguments are provided.
 
     Returns:
-    - argparse.Namespace: A namespace populated with command-line arguments.
+        argparse.Namespace: Parsed command-line arguments.
     """
     parser = argparse.ArgumentParser(
         description="Backup Handler Script for managing backups and notifications."
@@ -18,7 +29,7 @@ def setup_argparse():
     parser.add_argument(
         '--version',
         action='version',
-        version='backup-handler 2.2.0'
+        version='backup-handler 2.3.0'
     )
 
     # Configuration file argument
@@ -189,6 +200,16 @@ def setup_argparse():
     return args
 
 def validate_args(args, logger):
+    """
+    Validate parsed CLI arguments for mutual exclusivity and dependencies.
+
+    Exits with a clear error message if invalid combinations are detected
+    (e.g., ``--restore`` without ``--from-dir``, ``--scheduled`` with ``--dry-run``).
+
+    Parameters:
+        args (argparse.Namespace): Parsed CLI arguments.
+        logger: Logger instance for error reporting.
+    """
     # --scheduled and --dry-run don't make sense together
     if args.scheduled and args.dry_run:
         logger.error("--scheduled and --dry-run cannot be used together. "

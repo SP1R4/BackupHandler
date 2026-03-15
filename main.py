@@ -1,3 +1,19 @@
+"""
+main.py - Backup Handler CLI Entry Point and Orchestrator
+
+Central entry point that coordinates the entire backup pipeline:
+  1. Parse CLI arguments and resolve configuration
+  2. Execute early-exit commands (--status, --verify, --restore, --show-setup)
+  3. Run pre-backup hooks
+  4. Execute selected backup modes (local, SSH, S3, database)
+  5. Save manifests, encrypt, deduplicate, and apply retention policies
+  6. Run post-backup hooks and send notifications
+  7. Support scheduled mode with configurable times and graceful shutdown
+
+All backup operations are orchestrated through ``backup_operation()`` which
+handles both one-off CLI invocations and scheduled recurring runs.
+"""
+
 import os
 import sys
 import time
@@ -8,55 +24,52 @@ import logging
 from colorama import init
 from pathlib import Path
 from datetime import datetime
-# Import logging object
+
+# ─── Internal Module Imports ────────────────────────────────────────────────
 from src.logger import AppLogger
-# Import TelegramBot
 from bot.BotHandler import TelegramBot
-# Import banner function
 from banner.banner_show import print_banner
-# Import config utils
 from src.config import extract_config_values
-# Import sync utils
 from src.sync import (sync_ssh_servers_concurrently,
                       perform_full_backup,
                       perform_incremental_backup,
                       perform_differential_backup)
-# Import general utils
 from src.utils import (get_last_backup_time,
                       update_last_backup_time,
                       get_last_full_backup_time,
                       update_last_full_backup_time,
                       run_hook)
-# Import argparse setup
 from src.argparse_setup import setup_argparse, validate_args
-# Import manifest
 from src.manifest import BackupManifest, load_latest_manifest
-# Import retention
 from src.retention import cleanup_old_backups
-# Import restore
 from src.restore import restore_backup
-# Import S3 sync
 from src.s3_sync import sync_to_s3
-# Import encryption
 from src.encryption import encrypt_directory, decrypt_directory
-# Import database sync
 from src.db_sync import perform_db_backup
-# Import verification
 from src.verify import verify_backup_integrity, print_verify_report
-# Import SMTP email notifications
 from src.email_notify import send_smtp_email
-# Import deduplication
 from src.dedup import deduplicate_backup_dirs
+from src.webhook_notify import send_webhook
 
 
+# ─── Project Paths ──────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).parent
 CONFIG_PATH = str(_PROJECT_ROOT / 'config' / 'config.ini')
 LOG_PATH = str(_PROJECT_ROOT / 'Logs' / 'application.log')
 LOCK_FILE = _PROJECT_ROOT / '.backup-handler.lock'
 
 
+# ─── Instance Locking ───────────────────────────────────────────────────────
+
+
 def _acquire_lock(logger):
-    """Acquire a PID lock file to prevent duplicate scheduled instances."""
+    """
+    Acquire a PID lock file to prevent duplicate scheduled instances.
+
+    Checks if an existing lock file references a still-running process.
+    Stale lock files (from crashed instances) are automatically cleaned up.
+    Registers ``_release_lock`` via ``atexit`` for clean shutdown.
+    """
     if LOCK_FILE.exists():
         try:
             old_pid = int(LOCK_FILE.read_text().strip())
@@ -84,8 +97,15 @@ def _release_lock():
 init(autoreset=True)
 
 
+# ─── Configuration Resolution ───────────────────────────────────────────────
+
 def _resolve_config_path(args):
-    """Resolve config file path from --config, --profile, or default."""
+    """
+    Resolve the configuration file path from CLI arguments.
+
+    Priority: ``--profile`` > ``--config`` > default ``config/config.ini``.
+    Profiles resolve to ``config/config.<name>.ini``.
+    """
     if args.profile:
         profile_path = str(_PROJECT_ROOT / 'config' / f'config.{args.profile}.ini')
         if not os.path.exists(profile_path):
@@ -97,8 +117,14 @@ def _resolve_config_path(args):
     return CONFIG_PATH
 
 
+
+# ─── Status Dashboard ───────────────────────────────────────────────────────
+
 def show_status(logger, config_path):
-    """Display backup status: last backup times, directory sizes, and latest manifest."""
+    """
+    Display a backup status dashboard including last backup timestamps,
+    scheduled times, backup directory sizes, and latest manifest summary.
+    """
     print("\n=== Backup Status ===\n")
 
     # Last backup timestamps
@@ -176,7 +202,11 @@ def show_status(logger, config_path):
     print()
 
 
+
+# ─── Main Entry Point ───────────────────────────────────────────────────────
+
 def main():
+    """CLI entry point — parses arguments, routes to the appropriate operation."""
     print_banner()
 
     # Set up logging using AppLogger
@@ -230,7 +260,8 @@ def main():
                                  ssh_password=restore_config.get('ssh_password'),
                                  s3_region=restore_config.get('s3_region'),
                                  s3_access_key=restore_config.get('s3_access_key'),
-                                 s3_secret_key=restore_config.get('s3_secret_key'))
+                                 s3_secret_key=restore_config.get('s3_secret_key'),
+                                 dry_run=args.dry_run)
         if success:
             logger.info("Restore completed successfully.")
             print("Restore completed successfully.")
@@ -288,8 +319,26 @@ def main():
                          encrypt=args.encrypt,
                          dedup=args.dedup)
 
+
+# ─── Scheduled Mode ─────────────────────────────────────────────────────────
+
 def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns=None,
                         retain=None):
+    """
+    Run backups on a configurable schedule with graceful shutdown support.
+
+    Acquires a PID lock to prevent duplicate instances, then enters a polling
+    loop that checks the current time against configured schedule times every
+    30 seconds (matching the ±30s tolerance window). Handles SIGINT/SIGTERM
+    for clean shutdown.
+
+    Parameters:
+        logger: Logger instance.
+        config_file (str): Path to the INI configuration file.
+        telegram_bot (TelegramBot, optional): Telegram bot for notifications.
+        exclude_patterns (list, optional): Glob patterns to exclude.
+        retain (int, optional): CLI override for max_count retention policy.
+    """
     _acquire_lock(logger)
 
     # Handle SIGINT/SIGTERM for clean shutdown
@@ -381,13 +430,35 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
         logger.error(f"Error in scheduled_operation: {e}")
         sys.exit(1)
 
+
+# ─── Notification Helpers ───────────────────────────────────────────────────
+
 def _notify(logger, telegram_bot, notifications, message, config_values=None):
-    """Send notifications via Telegram and/or SMTP if configured."""
+    """
+    Dispatch notifications via all configured channels (Telegram and SMTP).
+
+    Telegram notifications require the ``--notifications`` flag and a valid bot.
+    SMTP notifications are sent when ``[SMTP]`` host and recipients are configured
+    in ``config_values``, regardless of the ``--notifications`` flag.
+    """
     if notifications and telegram_bot:
         try:
             telegram_bot.send_notification(message)
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")
+
+    # Webhook notification
+    if config_values:
+        webhook_url = config_values.get('webhook_url')
+        if webhook_url:
+            try:
+                headers = {}
+                auth_header = config_values.get('webhook_auth_header')
+                if auth_header:
+                    headers['Authorization'] = auth_header
+                send_webhook(logger, webhook_url, message, headers=headers or None)
+            except Exception as e:
+                logger.error(f"Failed to send webhook notification: {e}")
 
     # SMTP email notification
     if config_values:
@@ -412,7 +483,12 @@ def _notify(logger, telegram_bot, notifications, message, config_values=None):
 
 
 def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn, config_values=None):
-    """Run a backup function with standard notification and error handling."""
+    """
+    Execute a backup function with standardized notification and error handling.
+
+    Wraps the actual backup call in a try/except to ensure failure notifications
+    are always sent, even if the backup raises an unexpected exception.
+    """
     try:
         backup_fn()
         _notify(logger, telegram_bot, notifications, f"Local {mode_name} backup completed.", config_values=config_values)
@@ -421,13 +497,31 @@ def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn, confi
         _notify(logger, telegram_bot, notifications, f"{mode_name.capitalize()} backup failed.", config_values=config_values)
 
 
+
+# ─── Core Backup Pipeline ───────────────────────────────────────────────────
+
 def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None,
                      operation_modes=None, backup_mode=None, compress=None,
                      receiver=None, show_setup=False, notifications=False,
                      telegram_bot=None, ssh_username=None, ssh_password=None,
                      dry_run=False, exclude_patterns=None, retain=None,
                      config_path=None, config_values=None, encrypt=False, dedup=False):
+    """
+    Orchestrate the full backup pipeline for a single run.
 
+    Execution order:
+      1. Pre-backup hook (failure aborts the run)
+      2. Local / SSH / S3 / Database backup modes (based on ``operation_modes``)
+      3. Save backup manifests to each backup directory
+      4. Encrypt backup files (AES-256-GCM, if enabled)
+      5. Deduplicate via hardlinks (if enabled)
+      6. Update backup timestamps
+      7. Apply retention policies (age-based and count-based)
+      8. Post-backup hook (failure is logged but does not affect backup status)
+      9. Send completion notification
+
+    All parameters can be sourced from CLI args, config file, or both (CLI wins).
+    """
     # Show setup command (skip validation so incomplete configs can be inspected)
     if show_setup:
         extract_config_values(logger, config_path or CONFIG_PATH, show=True, skip_validation=True)
@@ -568,7 +662,10 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 sync_to_s3(logger, source_dir, s3_bucket, prefix=s3_prefix,
                            region=s3_region, access_key=s3_access_key,
                            secret_key=s3_secret_key, mode=backup_mode or 'full',
-                           exclude_patterns=exclude_patterns, manifest=manifest)
+                           exclude_patterns=exclude_patterns, manifest=manifest,
+                           max_bandwidth=config_values.get('s3_max_bandwidth'),
+                           multipart_threshold=config_values.get('s3_multipart_threshold'),
+                           max_concurrency=config_values.get('s3_max_concurrency'))
                 _notify(logger, telegram_bot, notifications, "S3 backup completed.",
                         config_values=config_values)
             except Exception as e:
@@ -621,10 +718,20 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             except Exception as e:
                 logger.error(f"Failed to save manifest to {bdir}: {e}")
 
+    # Warn about compression + encryption interaction
+    if compress and compress != 'none':
+        enc_check = encrypt or config_values.get('encryption_enabled', False)
+        if enc_check:
+            logger.warning("Both compression and encryption are enabled. "
+                           "Encrypted data does not compress well — compression runs first, "
+                           "then encryption is applied to the compressed archive.")
+
     # Encrypt backup files (after manifest save, before retention)
     encryption_enabled = encrypt or config_values.get('encryption_enabled', False)
     enc_passphrase = config_values.get('encryption_passphrase')
     enc_key_file = config_values.get('encryption_key_file')
+
+    enc_workers = config_values.get('encryption_workers', 1)
 
     if encryption_enabled and backup_dirs:
         if not enc_passphrase and not enc_key_file:
@@ -633,7 +740,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             for bdir in backup_dirs:
                 try:
                     count = encrypt_directory(bdir, passphrase=enc_passphrase,
-                                              key_file=enc_key_file, logger=logger)
+                                              key_file=enc_key_file, logger=logger,
+                                              workers=enc_workers)
                     logger.info(f"Encrypted {count} files in {bdir}")
                 except Exception as e:
                     logger.error(f"Encryption failed for {bdir}: {e}")
