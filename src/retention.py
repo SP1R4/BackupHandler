@@ -1,3 +1,16 @@
+"""
+retention.py - Backup Retention Policy Enforcement
+
+Automatically cleans up old backup files and directories based on two
+complementary strategies:
+  - Age-based:   Remove backups older than N days.
+  - Count-based: Keep only the N most recent backups per directory.
+
+Both policies can be active simultaneously. Age-based cleanup runs first,
+then count-based cleanup applies to the remaining entries. Manifest JSON
+files are excluded from cleanup to preserve backup history metadata.
+"""
+
 import os
 import time
 import shutil
@@ -63,7 +76,12 @@ def cleanup_old_backups(logger, backup_dirs, max_age_days=0, max_count=0):
 
 
 def _remove_entry(logger, entry):
-    """Remove a file or directory."""
+    """
+    Safely remove a file or directory, logging the outcome.
+
+    Uses ``shutil.rmtree`` for directories and ``unlink`` for files.
+    Errors are logged but do not propagate.
+    """
     try:
         if entry.is_dir():
             shutil.rmtree(entry)

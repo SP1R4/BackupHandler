@@ -1,3 +1,18 @@
+"""
+verify.py - Backup Integrity Verification
+
+Validates backup completeness and correctness by cross-referencing files
+in each backup directory against the latest JSON manifest. Checks include:
+
+  - File existence in the backup directory tree
+  - File size matching against manifest-recorded sizes
+  - Encrypted file handling (decrypts to a temp directory for verification)
+  - Fallback to file-existence-only check when no manifest is available
+
+The verification process is non-destructive — original backup files and
+encrypted copies are never modified.
+"""
+
 import os
 import tempfile
 from pathlib import Path
@@ -97,7 +112,7 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
                 dir_result['details'].append(f"MISSING: {file_path}")
                 continue
 
-            # Verify size
+            # Verify size and checksum
             try:
                 actual_size = candidate.stat().st_size
                 if actual_size != expected_size:
@@ -106,6 +121,17 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
                     results['corrupted'] += 1
                     dir_result['details'].append(f"SIZE MISMATCH: {candidate} (expected {expected_size}, got {actual_size})")
                     continue
+
+                # Verify SHA-256 checksum if recorded in manifest
+                expected_checksum = entry.get('checksum')
+                if expected_checksum:
+                    actual_checksum = calculate_checksum(str(candidate))
+                    if actual_checksum != expected_checksum:
+                        logger.warning(f"Checksum mismatch for {candidate}: expected {expected_checksum[:16]}..., got {actual_checksum[:16]}...")
+                        dir_result['corrupted'] += 1
+                        results['corrupted'] += 1
+                        dir_result['details'].append(f"CHECKSUM MISMATCH: {candidate}")
+                        continue
 
                 dir_result['verified'] += 1
                 results['verified'] += 1
@@ -121,11 +147,25 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
 
 
 def _find_file_in_backup(backup_dir, original_path):
-    """Try to locate a file in the backup directory by its original path."""
+    """
+    Locate a file in the backup directory by matching its original source path.
+
+    Since manifests record absolute source paths but files are stored relative
+    to the backup directory, this function searches by filename and scores
+    candidates by how many trailing path components match the original path.
+    This prevents false matches when multiple files share the same name in
+    different subdirectories.
+
+    Parameters:
+        backup_dir (Path): Root backup directory to search.
+        original_path (str): Original source path as recorded in the manifest.
+
+    Returns:
+        Path or None: Best-matching file path, or None if not found.
+    """
     orig = Path(original_path)
 
-    # Try matching by relative path suffix to handle subdirectory structure
-    # This avoids false matches when multiple files share the same name
+    # Score candidates by trailing path component overlap with the original
     orig_parts = orig.parts
     best_match = None
     best_match_len = 0
@@ -149,7 +189,19 @@ def _find_file_in_backup(backup_dir, original_path):
 
 
 def _find_encrypted_file(backup_dir, original_path):
-    """Try to find the encrypted (.enc) version of a file."""
+    """
+    Locate the encrypted (``.enc``) version of a file in the backup directory.
+
+    Uses the same path-suffix scoring as ``_find_file_in_backup`` but searches
+    for ``<filename>.enc`` and strips the ``.enc`` suffix before comparison.
+
+    Parameters:
+        backup_dir (Path): Root backup directory to search.
+        original_path (str): Original source path as recorded in the manifest.
+
+    Returns:
+        Path or None: Best-matching ``.enc`` file path, or None if not found.
+    """
     orig = Path(original_path)
     enc_name = orig.name + '.enc'
     orig_parts = orig.parts
@@ -176,7 +228,23 @@ def _find_encrypted_file(backup_dir, original_path):
 
 
 def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file, dir_result):
-    """Decrypt a file to a temp location and verify its size."""
+    """
+    Decrypt an encrypted file to a temporary directory and verify its size.
+
+    The original ``.enc`` file is copied to a temp directory before
+    decryption, ensuring the backup is never modified during verification.
+
+    Parameters:
+        logger: Logger instance.
+        enc_path (Path): Path to the encrypted file.
+        expected_size (int): Expected plaintext file size from the manifest.
+        passphrase (str): Encryption passphrase (or None).
+        key_file (str): Path to encryption key file (or None).
+        dir_result (dict): Per-directory result dict to update counters.
+
+    Returns:
+        bool: True if size matches, False otherwise.
+    """
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_enc = Path(tmp_dir) / enc_path.name
@@ -199,7 +267,21 @@ def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file
 
 
 def _verify_files_exist(logger, backup_dir, dir_result):
-    """Fallback: verify that files in the directory are readable."""
+    """
+    Fallback verification when no manifest is available.
+
+    Walks the directory tree and verifies that each file can be stat'd
+    (i.e., is readable and not corrupted at the filesystem level).
+    Manifest files are excluded from the count.
+
+    Parameters:
+        logger: Logger instance.
+        backup_dir (Path): Backup directory to scan.
+        dir_result (dict): Per-directory result dict to update counters.
+
+    Returns:
+        int: Total number of files checked.
+    """
     count = 0
     for f in backup_dir.rglob('*'):
         if not f.is_file():
@@ -218,7 +300,18 @@ def _verify_files_exist(logger, backup_dir, dir_result):
 
 
 def print_verify_report(results):
-    """Print a human-readable verification report."""
+    """
+    Print a human-readable backup verification report to stdout.
+
+    Displays aggregate totals and per-directory breakdowns with up to
+    20 detail lines per directory to avoid overwhelming output.
+
+    Parameters:
+        results (dict): Verification results from ``verify_backup_integrity()``.
+
+    Returns:
+        bool: True if all backups verified OK (no missing, corrupted, or errors).
+    """
     print("\n=== Backup Verification Report ===\n")
     print(f"Total files checked: {results['total']}")
     print(f"  Verified:  {results['verified']}")

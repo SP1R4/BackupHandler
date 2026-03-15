@@ -1,3 +1,15 @@
+"""
+config.py - Configuration Loading, Validation, and Display
+
+Loads INI-format configuration files via ``configparser``, resolves
+``${ENV_VAR}`` placeholders from the environment, validates required
+fields with clear error messages, and extracts all settings into a
+normalized dictionary for use by the backup pipeline.
+
+Supports conditional validation — SSH, S3, database, and encryption
+fields are only validated when their respective mode is enabled.
+"""
+
 import os
 import re
 import sys
@@ -5,11 +17,24 @@ import configparser
 from pathlib import Path
 from src.utils import is_valid_email
 
+# ─── Schema Version ─────────────────────────────────────────────────────────
+CURRENT_SCHEMA_VERSION = "3"
+
+
+# ─── Environment Variable Resolution ────────────────────────────────────────
 
 def resolve_env_vars(value):
     """
-    Replace ${ENV_VAR} placeholders in a string with their environment variable values.
-    Raises ValueError if a referenced environment variable is not set.
+    Replace ``${ENV_VAR}`` placeholders in a string with environment variable values.
+
+    Parameters:
+        value (str): Config value potentially containing ``${VAR}`` references.
+
+    Returns:
+        str: Value with all placeholders resolved.
+
+    Raises:
+        ValueError: If a referenced environment variable is not set.
     """
     def _replace(match):
         var_name = match.group(1)
@@ -23,9 +48,32 @@ def resolve_env_vars(value):
     return re.sub(r'\$\{([^}]+)\}', _replace, value)
 
 
+def _check_schema_version(config, logger):
+    """
+    Check the config file's schema version against the expected version.
+
+    Logs a warning if the config is outdated or missing a [META] section,
+    helping users identify when their config needs updating after an upgrade.
+    """
+    file_version = normalize_none(config.get('META', 'schema_version', fallback=None))
+    if file_version is None:
+        logger.warning(
+            f"Config file has no [META] schema_version. "
+            f"Expected version {CURRENT_SCHEMA_VERSION}. "
+            f"Add [META] schema_version = {CURRENT_SCHEMA_VERSION} to suppress this warning."
+        )
+    elif file_version != CURRENT_SCHEMA_VERSION:
+        logger.warning(
+            f"Config schema version mismatch: file has v{file_version}, "
+            f"expected v{CURRENT_SCHEMA_VERSION}. Review config/config.ini.example for new options."
+        )
+
+
 def _resolve_all_env_vars(config, logger):
     """
-    Walk all sections (including DEFAULT) and resolve ${ENV_VAR} placeholders in-place.
+    Walk all config sections (including DEFAULT) and resolve ``${ENV_VAR}``
+    placeholders in-place. Exits with a clear error if any referenced
+    variable is not set in the environment.
     """
     sections = ['DEFAULT'] + config.sections()
     for section in sections:
@@ -42,10 +90,19 @@ def _resolve_all_env_vars(config, logger):
                     sys.exit(1)
 
 
+
+# ─── Value Normalization ────────────────────────────────────────────────────
+
 def normalize_none(value):
     """
-    Return None if value is 'None', empty, or whitespace-only.
-    Otherwise return the stripped string.
+    Normalize config values by converting sentinel strings to Python None.
+
+    INI files represent unset values as the literal string ``None`` or empty
+    strings. This function converts those to actual ``None`` for cleaner
+    downstream handling.
+
+    Returns:
+        str or None: Stripped value, or None if empty/``None``.
     """
     if value is None:
         return None
@@ -55,21 +112,35 @@ def normalize_none(value):
     return stripped
 
 
+
+# ─── Configuration Extraction ───────────────────────────────────────────────
+
 def extract_config_values(logger, config_file_path, show=False, require_schedule=False,
                           skip_validation=False):
     """
-    Extract configuration values from the specified INI file and return them as a dictionary.
+    Load, validate, and extract all configuration values from an INI file.
+
+    This is the primary entry point for configuration loading. It:
+      1. Reads the INI file via ``configparser``
+      2. Resolves ``${ENV_VAR}`` placeholders
+      3. Validates required fields (unless ``skip_validation=True``)
+      4. Normalizes values and resolves relative paths to absolute
+      5. Returns a flat dictionary or prints a human-readable summary
 
     Parameters:
-    - config_file_path (str): The path to the configuration file.
-    - show (bool): If True, print the configuration dictionary. If False, return the dictionary.
-    - require_schedule (bool): If True, validate that schedule times are present.
-    - skip_validation (bool): If True, skip config validation (for --show-setup debugging).
+        logger: Logger instance.
+        config_file_path (str): Path to the INI configuration file.
+        show (bool): If True, print configuration to stdout instead of returning.
+        require_schedule (bool): If True, validate schedule times are present.
+        skip_validation (bool): If True, skip validation (for ``--show-setup``).
 
     Returns:
-    - dict: A dictionary containing the extracted configuration values if show=False.
+        dict or None: Configuration dictionary if ``show=False``, else None.
     """
     config = load_config(logger, config_file_path)
+
+    # Check schema version for config compatibility warnings
+    _check_schema_version(config, logger)
 
     # Resolve ${ENV_VAR} placeholders before validation
     _resolve_all_env_vars(config, logger)
@@ -111,11 +182,15 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         s3_region = normalize_none(config.get('S3', 'region', fallback=None))
         s3_access_key = normalize_none(config.get('S3', 'access_key', fallback=None))
         s3_secret_key = normalize_none(config.get('S3', 'secret_key', fallback=None))
+        s3_max_bandwidth = config.getint('S3', 'max_bandwidth', fallback=0)
+        s3_multipart_threshold = config.getint('S3', 'multipart_threshold', fallback=8)
+        s3_max_concurrency = config.getint('S3', 'max_concurrency', fallback=10)
 
         # Encryption config
         encryption_enabled = config.getboolean('ENCRYPTION', 'enabled', fallback=False)
         encryption_key_file = normalize_none(config.get('ENCRYPTION', 'key_file', fallback=None))
         encryption_passphrase = normalize_none(config.get('ENCRYPTION', 'passphrase', fallback=None))
+        encryption_workers = config.getint('ENCRYPTION', 'workers', fallback=1)
 
         # Database config
         db_user = normalize_none(config.get('DATABASE', 'user', fallback=None))
@@ -123,6 +198,8 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         db_database = normalize_none(config.get('DATABASE', 'database', fallback=None))
         db_host = normalize_none(config.get('DATABASE', 'host', fallback=None)) or 'localhost'
         db_port = config.getint('DATABASE', 'port', fallback=3306)
+        db_single_transaction = config.getboolean('DATABASE', 'single_transaction', fallback=True)
+        db_binlog_position = config.getboolean('DATABASE', 'binlog_position', fallback=False)
 
         # SMTP config
         smtp_host = normalize_none(config.get('SMTP', 'host', fallback=None))
@@ -135,6 +212,10 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
 
         # Dedup config
         dedup_enabled = config.getboolean('DEDUP', 'enabled', fallback=False)
+
+        # Webhook config
+        webhook_url = normalize_none(config.get('WEBHOOK', 'url', fallback=None))
+        webhook_auth_header = normalize_none(config.get('WEBHOOK', 'auth_header', fallback=None))
 
         config_vars = {
             'source_dir': config.get('DEFAULT', 'source_dir', fallback=None),
@@ -163,15 +244,21 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             's3_region': s3_region,
             's3_access_key': s3_access_key,
             's3_secret_key': s3_secret_key,
+            's3_max_bandwidth': s3_max_bandwidth if s3_max_bandwidth > 0 else None,
+            's3_multipart_threshold': s3_multipart_threshold,
+            's3_max_concurrency': s3_max_concurrency,
             'encryption_enabled': encryption_enabled,
             'encryption_key_file': encryption_key_file,
             'encryption_passphrase': encryption_passphrase,
+            'encryption_workers': max(1, encryption_workers),
             'db_mode': config.getboolean('MODES', 'db', fallback=False),
             'db_user': db_user,
             'db_password': db_password,
             'db_database': db_database,
             'db_host': db_host,
             'db_port': db_port,
+            'db_single_transaction': db_single_transaction,
+            'db_binlog_position': db_binlog_position,
             'smtp_host': smtp_host,
             'smtp_port': smtp_port,
             'smtp_user': smtp_user,
@@ -180,6 +267,8 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             'smtp_to': [e.strip() for e in smtp_to.split(',') if e.strip()] if smtp_to else [],
             'smtp_tls': smtp_tls,
             'dedup_enabled': dedup_enabled,
+            'webhook_url': webhook_url,
+            'webhook_auth_header': webhook_auth_header,
         }
 
         # Resolve relative paths to absolute
@@ -235,14 +324,17 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             print("ENCRYPTION:")
             print(f"  Enabled    : {'Yes' if config_vars['encryption_enabled'] else 'No'}")
             print(f"  Key File   : {config_vars['encryption_key_file'] or 'Not Set'}")
-            print(f"  Passphrase : {'*****' if config_vars['encryption_passphrase'] else 'Not Set'}\n")
+            print(f"  Passphrase : {'*****' if config_vars['encryption_passphrase'] else 'Not Set'}")
+            print(f"  Workers    : {config_vars['encryption_workers']}\n")
 
             print("DATABASE:")
             print(f"  User     : {config_vars['db_user'] or 'Not Set'}")
             print(f"  Password : {'*****' if config_vars['db_password'] else 'Not Set'}")
             print(f"  Database : {config_vars['db_database'] or 'Not Set'}")
             print(f"  Host     : {config_vars['db_host']}")
-            print(f"  Port     : {config_vars['db_port']}\n")
+            print(f"  Port     : {config_vars['db_port']}")
+            print(f"  SingleTx : {'Yes' if config_vars['db_single_transaction'] else 'No'}")
+            print(f"  Binlog   : {'Yes' if config_vars['db_binlog_position'] else 'No'}\n")
 
             print("SMTP:")
             print(f"  Host     : {config_vars['smtp_host'] or 'Not Set'}")
@@ -255,6 +347,10 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             print("DEDUP:")
             print(f"  Enabled  : {'Yes' if config_vars['dedup_enabled'] else 'No'}\n")
 
+            print("WEBHOOK:")
+            print(f"  URL          : {config_vars['webhook_url'] or 'Not Set'}")
+            print(f"  Auth Header  : {'Set' if config_vars['webhook_auth_header'] else 'Not Set'}\n")
+
             print("NOTIFICATIONS:")
             print(f"  Bot             : {'Enabled' if config_vars['bot'] else 'Disabled'}")
             print(f"  Receiver Emails : {', '.join(config_vars['receiver_emails']) if config_vars['receiver_emails'] else 'Disabled'}\n")
@@ -265,15 +361,21 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         logger.error(f"Error extracting config values: {e}")
         raise
 
+
+# ─── Configuration Validation ───────────────────────────────────────────────
+
 def validate_config(logger, config, require_schedule=False):
     """
-    Validate that required configurations are set.
-    Exits with clear error messages pointing users to the exact config field.
+    Validate that all required configuration fields are set and well-formed.
+
+    Collects all errors before exiting so users can fix multiple issues in
+    one pass. Conditionally validates SSH, S3, encryption, and database
+    fields only when their respective mode is enabled.
 
     Parameters:
-    - logger (logging.Logger): Logger instance for logging errors.
-    - config (configparser.ConfigParser): Loaded configuration object.
-    - require_schedule (bool): If True, require schedule times to be set.
+        logger: Logger instance.
+        config (configparser.ConfigParser): Loaded configuration object.
+        require_schedule (bool): If True, validate schedule time format.
     """
     errors = []
 
@@ -397,9 +499,15 @@ def validate_config(logger, config, require_schedule=False):
             print(f"  - {err}", file=sys.stderr)
         sys.exit(1)
 
+
+# ─── Utility Functions ──────────────────────────────────────────────────────
+
 def is_valid_time_format(time_string):
     """
-    Check if the time string is in the format HH:MM (24-hour format).
+    Check if a time string is in HH:MM 24-hour format.
+
+    Returns:
+        bool: True if valid, False otherwise.
     """
     from datetime import datetime
     try:
@@ -410,7 +518,17 @@ def is_valid_time_format(time_string):
 
 def load_config(logger, config_path):
     """
-    Load configuration from the specified INI file.
+    Load and parse an INI configuration file.
+
+    Exits with a clear error message if the file is empty, malformed,
+    or cannot be read.
+
+    Parameters:
+        logger: Logger instance.
+        config_path (str): Path to the INI file.
+
+    Returns:
+        configparser.ConfigParser: Loaded configuration object.
     """
     config = configparser.ConfigParser()
 

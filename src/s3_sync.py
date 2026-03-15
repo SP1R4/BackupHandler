@@ -1,12 +1,22 @@
+"""
+s3_sync.py - AWS S3 Cloud Backup Synchronization
+
+Uploads local backup files to an AWS S3 bucket with support for full,
+incremental, and differential modes. In incremental/differential mode,
+compares local modification times against S3 object timestamps to skip
+unchanged files. Displays a progress bar via ``tqdm`` during upload.
+"""
+
 import os
 from pathlib import Path
 from tqdm import tqdm
-from .utils import should_exclude
+from .utils import should_exclude, calculate_checksum
 
 
 def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
                access_key=None, secret_key=None, mode='full',
-               exclude_patterns=None, manifest=None):
+               exclude_patterns=None, manifest=None,
+               max_bandwidth=None, multipart_threshold=None, max_concurrency=None):
     """
     Sync a local directory to an S3 bucket.
 
@@ -47,6 +57,17 @@ def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
 
     s3 = boto3.client('s3', **session_kwargs)
 
+    # Configure transfer settings for bandwidth and multipart uploads
+    from boto3.s3.transfer import TransferConfig
+    transfer_kwargs = {}
+    if max_bandwidth:
+        transfer_kwargs['max_bandwidth'] = max_bandwidth * 1024  # KB/s -> bytes/s
+    if multipart_threshold:
+        transfer_kwargs['multipart_threshold'] = multipart_threshold * 1024 * 1024  # MB -> bytes
+    if max_concurrency:
+        transfer_kwargs['max_concurrency'] = max_concurrency
+    transfer_config = TransferConfig(**transfer_kwargs) if transfer_kwargs else None
+
     # Collect files to upload
     files = [f for f in source_path.rglob('*')
              if f.is_file() and not should_exclude(f.relative_to(source_path), exclude_patterns)]
@@ -83,11 +104,15 @@ def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
 
         if should_upload:
             try:
-                s3.upload_file(str(local_file), bucket, s3_key)
+                upload_kwargs = {}
+                if transfer_config:
+                    upload_kwargs['Config'] = transfer_config
+                s3.upload_file(str(local_file), bucket, s3_key, **upload_kwargs)
                 logger.info(f"Uploaded {local_file} -> s3://{bucket}/{s3_key}")
                 uploaded += 1
                 if manifest:
-                    manifest.record_copy(str(local_file), local_file.stat().st_size)
+                    checksum = calculate_checksum(str(local_file))
+                    manifest.record_copy(str(local_file), local_file.stat().st_size, checksum=checksum)
             except Exception as e:
                 logger.error(f"Failed to upload {local_file} to S3: {e}")
                 failed += 1
