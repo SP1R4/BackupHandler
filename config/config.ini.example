@@ -100,6 +100,23 @@ use_tls = True
 # OPTIONAL: Enable file-level deduplication using hardlinks (True/False)
 enabled = False
 
+[TAILSCALE]
+# OPTIONAL: Enable Tailscale VPN for SSH backups (True/False)
+enabled = False
+# OPTIONAL: Tailscale pre-authentication key for automated login
+# Generate at: https://login.tailscale.com/admin/settings/keys
+# Supports env var syntax: auth_key = ${TAILSCALE_AUTH_KEY}
+auth_key = None
+# OPTIONAL: Override machine hostname on the tailnet
+hostname = None
+# OPTIONAL: ACL tags to advertise (e.g. tag:backup)
+advertise_tags = None
+# OPTIONAL: Accept routes advertised by other Tailscale nodes (True/False)
+accept_routes = False
+# OPTIONAL: Disconnect Tailscale after SSH backup completes (True/False)
+# Set to False to keep the connection alive for other uses
+disconnect_after = False
+
 [SCHEDULE]
 # REQUIRED (for --scheduled mode): Comma-separated times in HH:MM (24-hour) format
 times = 03:00, 12:00

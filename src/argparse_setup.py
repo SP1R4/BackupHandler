@@ -177,6 +177,19 @@ def setup_argparse():
         help='Encrypt backup files at rest using AES-256-GCM (overrides config [ENCRYPTION] enabled)'
     )
 
+    # Tailscale options
+    parser.add_argument(
+        '--tailscale',
+        action='store_true',
+        help='Enable Tailscale VPN for SSH backups (connects using pre-auth key before SSH sync)'
+    )
+    parser.add_argument(
+        '--tailscale-authkey',
+        type=str,
+        default=None,
+        help='Tailscale pre-auth key (overrides config [TAILSCALE] auth_key)'
+    )
+
     # Notifications option
     parser.add_argument(
         '--notifications',

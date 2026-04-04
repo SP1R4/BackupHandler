@@ -217,6 +217,14 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         webhook_url = normalize_none(config.get('WEBHOOK', 'url', fallback=None))
         webhook_auth_header = normalize_none(config.get('WEBHOOK', 'auth_header', fallback=None))
 
+        # Tailscale config
+        tailscale_enabled = config.getboolean('TAILSCALE', 'enabled', fallback=False)
+        tailscale_auth_key = normalize_none(config.get('TAILSCALE', 'auth_key', fallback=None))
+        tailscale_hostname = normalize_none(config.get('TAILSCALE', 'hostname', fallback=None))
+        tailscale_advertise_tags = normalize_none(config.get('TAILSCALE', 'advertise_tags', fallback=None))
+        tailscale_accept_routes = config.getboolean('TAILSCALE', 'accept_routes', fallback=False)
+        tailscale_disconnect_after = config.getboolean('TAILSCALE', 'disconnect_after', fallback=False)
+
         config_vars = {
             'source_dir': config.get('DEFAULT', 'source_dir', fallback=None),
             'mode': config.get('DEFAULT', 'mode', fallback='full'),
@@ -269,6 +277,12 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             'dedup_enabled': dedup_enabled,
             'webhook_url': webhook_url,
             'webhook_auth_header': webhook_auth_header,
+            'tailscale_enabled': tailscale_enabled,
+            'tailscale_auth_key': tailscale_auth_key,
+            'tailscale_hostname': tailscale_hostname,
+            'tailscale_advertise_tags': tailscale_advertise_tags,
+            'tailscale_accept_routes': tailscale_accept_routes,
+            'tailscale_disconnect_after': tailscale_disconnect_after,
         }
 
         # Resolve relative paths to absolute
@@ -297,6 +311,14 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             print(f"  SSH Username     : {config_vars['ssh_username'] or 'Not Set'}")
             print(f"  SSH Password     : {'*' * len(config_vars['ssh_password']) if config_vars['ssh_password'] else 'Not Set'}")
             print(f"  Bandwidth Limit  : {config_vars['bandwidth_limit']} KB/s\n" if config_vars['bandwidth_limit'] else "  Bandwidth Limit  : Unlimited\n")
+
+            print("TAILSCALE:")
+            print(f"  Enabled          : {'Yes' if config_vars['tailscale_enabled'] else 'No'}")
+            print(f"  Auth Key         : {'*' * 8 + '...' if config_vars['tailscale_auth_key'] else 'Not Set'}")
+            print(f"  Hostname         : {config_vars['tailscale_hostname'] or 'Default'}")
+            print(f"  Advertise Tags   : {config_vars['tailscale_advertise_tags'] or 'None'}")
+            print(f"  Accept Routes    : {'Yes' if config_vars['tailscale_accept_routes'] else 'No'}")
+            print(f"  Disconnect After : {'Yes' if config_vars['tailscale_disconnect_after'] else 'No'}\n")
 
             print("S3:")
             print(f"  Bucket  : {config_vars['s3_bucket'] or 'Not Set'}")
