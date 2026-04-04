@@ -393,6 +393,21 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
                     break
             if matched:
                 logger.info("Scheduled time matched. Performing backup operation...")
+                # Pre-flight: verify backup directories are accessible
+                sched_backup_dirs = config_values.get('backup_dirs', [])
+                if sched_backup_dirs:
+                    inaccessible = _check_backup_dirs_accessible(logger, sched_backup_dirs)
+                    if inaccessible:
+                        msg = (f"Scheduled backup aborted: destination(s) inaccessible: "
+                               f"{', '.join(inaccessible)}. Check that the disk is mounted.")
+                        logger.error(msg)
+                        if telegram_bot:
+                            try:
+                                telegram_bot.send_notification(msg)
+                            except Exception as e:
+                                logger.error(f"Failed to send Telegram notification: {e}")
+                        time.sleep(30)
+                        continue
                 # Build operation_modes from config flags
                 operation_modes = []
                 if config_values.get('local_mode'):
@@ -498,6 +513,39 @@ def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn, confi
 
 
 
+# ─── Pre-flight Checks ─────────────────────────────────────────────────────
+
+def _check_backup_dirs_accessible(logger, backup_dirs):
+    """
+    Verify that backup directories are accessible before starting a backup.
+
+    For paths under a mount point (e.g. /mnt/*), checks that the mount point
+    is actually mounted. Also ensures each backup directory exists or can be
+    created. Returns a list of inaccessible directories (empty = all OK).
+    """
+    inaccessible = []
+    for bdir in (backup_dirs or []):
+        bpath = Path(bdir)
+        # Check if the path is under a mount point (e.g. /mnt/data/...)
+        parts = bpath.parts
+        if len(parts) >= 3 and parts[1] == 'mnt':
+            mount_point = Path('/') / parts[1] / parts[2]  # e.g. /mnt/data
+            if not os.path.ismount(str(mount_point)):
+                logger.error(f"Mount point {mount_point} is not mounted. "
+                             f"Backup directory {bdir} is inaccessible.")
+                inaccessible.append(bdir)
+                continue
+        # Check if the directory exists or its parent is writable
+        if not bpath.exists():
+            try:
+                bpath.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created backup directory: {bdir}")
+            except OSError as e:
+                logger.error(f"Cannot create backup directory {bdir}: {e}")
+                inaccessible.append(bdir)
+    return inaccessible
+
+
 # ─── Core Backup Pipeline ───────────────────────────────────────────────────
 
 def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None,
@@ -540,6 +588,16 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
     # Use config exclude patterns if CLI didn't provide them
     if exclude_patterns is None:
         exclude_patterns = config_values.get('exclude_patterns', [])
+
+    # Pre-flight: verify backup directories are accessible
+    if backup_dirs and not dry_run and not show_setup:
+        inaccessible = _check_backup_dirs_accessible(logger, backup_dirs)
+        if inaccessible:
+            msg = (f"Backup aborted: destination(s) inaccessible: {', '.join(inaccessible)}. "
+                   f"Check that the disk is mounted.")
+            logger.error(msg)
+            _notify(logger, telegram_bot, notifications, msg, config_values=config_values)
+            return
 
     # Hooks
     pre_hook = config_values.get('pre_backup_hook')
