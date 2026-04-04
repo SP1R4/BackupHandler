@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-2.4.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.5.0-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
 
 <p align="center">
   A robust, security-hardened backup solution supporting local, SSH/SFTP, S3, and MySQL backups<br>
-  with Tailscale VPN integration, encryption at rest, deduplication, scheduling, compression, and multi-channel notifications.
+  with system snapshots for OS rebuild, Tailscale VPN integration, encryption at rest, deduplication, scheduling, compression, and multi-channel notifications.
 </p>
 
 ---
@@ -29,6 +29,7 @@
 - [Deduplication](#deduplication)
 - [Tailscale VPN Integration](#tailscale-vpn-integration)
 - [Pre-flight Checks](#pre-flight-checks)
+- [System Snapshot & Restore](#system-snapshot--restore)
 - [Backup Verification](#backup-verification)
 - [Restore](#restore)
 - [Retention Policies](#retention-policies)
@@ -78,6 +79,8 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Dry Run** | Preview all operations without copying, syncing, or modifying anything (including restore) |
 | **Status Dashboard** | View last backup times, directory sizes, and manifest summaries |
 | **Symlink Support** | Symbolic links preserved as links during backup (not dereferenced) |
+| **System Snapshots** | Capture full system state (packages, configs, apps, keys) and generate restore scripts for OS rebuild |
+| **Snapshot Diff** | Compare two snapshots to see what packages, extensions, or configs changed over time |
 | **Pre-flight Checks** | Verifies backup destination mount points are accessible before starting, with notifications on failure |
 | **Instance Locking** | PID lock file prevents duplicate scheduled instances |
 | **Startup Service** | Cross-platform service installation (systemd, launchd, Task Scheduler) |
@@ -156,6 +159,7 @@ backup_handler/
 │   ├── restore.py                   # Restore from local, ZIP, SSH, S3 with dry-run support
 │   ├── retention.py                 # Age-based and count-based backup cleanup
 │   ├── s3_sync.py                   # AWS S3 upload with bandwidth throttling and multipart
+│   ├── snapshot.py                   # System state snapshot & restore script generation
 │   ├── sync.py                      # Local sync, SFTP upload, backup operations
 │   ├── tailscale.py                 # Tailscale VPN management (up/down/status/resolve)
 │   ├── utils.py                     # Checksums, OTP, timestamps, validation
@@ -191,6 +195,7 @@ backup_handler/
 │   ├── __init__.py
 │   └── test_features.py             # 46 unit tests for all major features
 │
+├── snapshots/                       # System state snapshots (auto-created)
 └── Logs/                            # Log output directory (auto-created)
 ```
 
@@ -461,6 +466,18 @@ python main.py --dry-run --operation-modes local ssh --backup-mode full \
 # Show current configuration
 python main.py --show-setup
 
+# Create a system snapshot (packages, configs, apps, keys)
+python main.py --snapshot
+
+# Create a snapshot to a specific directory
+python main.py --snapshot --snapshot-output /mnt/data/backups/snapshots
+
+# Generate a restore script from a snapshot
+python main.py --restore-snapshot snapshots/snapshot_myhost_20260404.json
+
+# Compare two snapshots to see what changed
+python main.py --snapshot-diff snapshots/old.json snapshots/new.json
+
 # View backup status dashboard
 python main.py --status
 
@@ -485,6 +502,10 @@ python main.py --profile production --operation-modes local --backup-mode full \
 | `--dedup` | Enable file-level deduplication via hardlinks |
 | `--exclude PATTERNS` | Comma-separated glob patterns to exclude |
 | `--retain N` | Keep only N most recent backups per directory |
+| `--snapshot` | Create a system state snapshot (packages, configs, apps, keys) |
+| `--restore-snapshot FILE` | Generate a restore script from a snapshot JSON file |
+| `--snapshot-output PATH` | Output directory or file path for snapshot/restore script |
+| `--snapshot-diff OLD NEW` | Compare two snapshots and show added/removed items |
 | `--tailscale` | Enable Tailscale VPN for SSH backups (connects using pre-auth key) |
 | `--tailscale-authkey KEY` | Tailscale pre-auth key (overrides config `[TAILSCALE] auth_key`) |
 | `--scheduled` | Run in scheduled mode using config times |
@@ -641,6 +662,98 @@ Before any backup operation starts, Backup Handler verifies that all backup dest
 - **Failure notification**: If destinations are inaccessible, the backup aborts immediately with a clear error and sends notifications (Telegram, SMTP, webhook) so you know right away
 
 This prevents the common scenario where an external disk becomes unmounted and backups silently fail for days.
+
+---
+
+## System Snapshot & Restore
+
+Never lose your system setup to a format again. The snapshot feature captures your entire machine state and generates a restore script that rebuilds everything on a fresh OS install.
+
+### What it captures
+
+| Category | Linux/Ubuntu | Windows |
+|----------|-------------|---------|
+| **Packages** | APT (manually installed), Snap, Flatpak, pipx, pip user, npm global, Cargo, Go | Winget, Chocolatey, pip, npm, Cargo |
+| **Repositories** | APT sources lists, PPAs, GPG keyrings | — |
+| **Configs** | Dotfiles (`.bashrc`, `.gitconfig`, `.ssh/config`, etc.), cron jobs, systemd user services, dconf/GNOME settings, `/etc/fstab`, `/etc/hosts` | Environment variables, dotfiles, scheduled tasks |
+| **Apps** | VS Code extensions + settings, Sublime Text settings, browser profile paths (Firefox, Brave, Chrome), Docker images + compose files | VS Code extensions + settings, WSL distros, Docker |
+| **Security** | SSH key metadata (public only), GPG key IDs | SSH key metadata |
+| **Network** | NetworkManager connections (WiFi/VPN names), WireGuard config names | — |
+| **Shell** | Shell history (last 5000 entries), custom scripts in `~/bin` and `~/.local/bin` | — |
+| **Fonts** | User-installed fonts (`~/.local/share/fonts`) | — |
+
+### Creating a snapshot
+
+```bash
+# Snapshot to default directory (snapshots/)
+python main.py --snapshot
+
+# Snapshot to backup disk
+python main.py --snapshot --snapshot-output /mnt/data/backups/snapshots
+```
+
+Output: `snapshot_<hostname>_<timestamp>.json`
+
+### Generating a restore script
+
+```bash
+python main.py --restore-snapshot snapshots/snapshot_myhost_20260404_135413.json
+```
+
+This generates an executable bash script (Linux) or PowerShell script (Windows) with:
+
+- **14 phased sections** in correct install order (repos → APT → Snap → pip → npm → Cargo → VS Code → dotfiles → cron → dconf → fstab → hosts)
+- **Error-tolerant** — each package install uses `|| warn` so one failure doesn't stop the script
+- **Base64-encoded content** �� dotfiles, VS Code settings, dconf dumps are safely embedded
+- **Correct ownership** — `run_as_user` helper ensures files belong to your user, not root
+- **Manual step reminders** — SSH keys, GPG keys, browser profiles, WiFi passwords, fstab merging
+
+### Running the restore
+
+After a fresh OS install:
+
+```bash
+# Mount your backup disk
+sudo mount /dev/sdb1 /mnt/data
+
+# Review the script first!
+less /mnt/data/backups/snapshots/restore_myhost.sh
+
+# Run it
+chmod +x restore_myhost.sh
+sudo ./restore_myhost.sh
+```
+
+### Comparing snapshots
+
+Track what changed on your system over time:
+
+```bash
+python main.py --snapshot-diff snapshots/march.json snapshots/april.json
+```
+
+Output:
+```
+=== Snapshot Diff ===
+
+  apt:
+    + newpackage
+    - removedpackage
+
+  vscode_extensions:
+    + ms-python.python
+
+  snap:
+    + signal-desktop
+```
+
+### Security notes
+
+- **SSH private keys are NOT captured** — only public key metadata (filenames, types, comments) for reference
+- **GPG private keys are NOT captured** — only key IDs and UIDs
+- **WiFi passwords are NOT captured** — only connection names with a flag indicating if a PSK exists
+- **WireGuard configs are NOT captured** — only config file names
+- All sensitive content must be restored manually from your backup
 
 ---
 
@@ -863,6 +976,9 @@ Logs are written to `Logs/application.log` with automatic rotation:
 | Deduplication not saving space | Hardlinks only work within the same filesystem — ensure backup dirs share a mount |
 | Verification shows all files missing | Ensure the backup was made with manifests enabled (v2.0.0+) |
 | Checksum mismatches during verification | Files may have been modified after backup. Re-run a full backup |
+| Snapshot missing packages | Some collectors require the tool to be installed (e.g., `snap`, `flatpak`, `cargo`). Missing tools are silently skipped |
+| Restore script syntax error | Should not happen with base64 encoding. If it does, validate with `bash -n restore.sh` |
+| `--snapshot-diff` shows no changes | Both snapshots are identical. Create a new snapshot after making changes |
 | `Tailscale is not installed` | Install Tailscale: `curl -fsSL https://tailscale.com/install.sh \| sh` |
 | `Failed to bring Tailscale up` | Verify auth key is valid and not expired. Check `sudo tailscale up` works manually |
 | `Tailscale auth key missing` | Set `--tailscale-authkey` or `[TAILSCALE] auth_key` in config |
