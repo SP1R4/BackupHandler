@@ -50,6 +50,7 @@ from src.verify import verify_backup_integrity, print_verify_report
 from src.email_notify import send_smtp_email
 from src.dedup import deduplicate_backup_dirs
 from src.webhook_notify import send_webhook
+from src.tailscale import tailscale_up, tailscale_down, get_tailscale_status
 
 
 # ─── Project Paths ──────────────────────────────────────────────────────────
@@ -317,7 +318,9 @@ def main():
                          retain=args.retain,
                          config_path=config_path,
                          encrypt=args.encrypt,
-                         dedup=args.dedup)
+                         dedup=args.dedup,
+                         tailscale=args.tailscale,
+                         tailscale_authkey=args.tailscale_authkey)
 
 
 # ─── Scheduled Mode ─────────────────────────────────────────────────────────
@@ -553,7 +556,8 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                      receiver=None, show_setup=False, notifications=False,
                      telegram_bot=None, ssh_username=None, ssh_password=None,
                      dry_run=False, exclude_patterns=None, retain=None,
-                     config_path=None, config_values=None, encrypt=False, dedup=False):
+                     config_path=None, config_values=None, encrypt=False, dedup=False,
+                     tailscale=False, tailscale_authkey=None):
     """
     Orchestrate the full backup pipeline for a single run.
 
@@ -683,28 +687,64 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                         config_values=config_values)
             update_last_full_backup_time()
 
+    # Resolve Tailscale settings (CLI flags override config)
+    ts_enabled = tailscale or config_values.get('tailscale_enabled', False)
+    ts_auth_key = tailscale_authkey or config_values.get('tailscale_auth_key')
+    ts_hostname = config_values.get('tailscale_hostname')
+    ts_tags = config_values.get('tailscale_advertise_tags')
+    ts_accept_routes = config_values.get('tailscale_accept_routes', False)
+    ts_disconnect_after = config_values.get('tailscale_disconnect_after', False)
+    _ts_brought_up = False
+
     if operation_modes and ('ssh' in operation_modes):
         if not ssh_servers:
             logger.warning("SSH mode selected but no SSH servers specified. Skipping SSH backup.")
         elif dry_run:
             logger.info(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {ssh_servers}")
             print(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {', '.join(ssh_servers)}")
+            if ts_enabled:
+                print(f"[DRY RUN] Would connect via Tailscale VPN (auth_key: {'set' if ts_auth_key else 'not set'})")
         else:
-            _notify(logger, telegram_bot, notifications, "Starting SSH backup...",
-                    config_values=config_values)
-            logger.info("Running SSH backup...")
-            try:
-                sync_ssh_servers_concurrently(source_dir, ssh_servers, username=ssh_username or '',
-                                              password=ssh_password, logger=logger,
-                                              exclude_patterns=exclude_patterns,
-                                              manifest=manifest,
-                                              bandwidth_limit=bandwidth_limit)
-                _notify(logger, telegram_bot, notifications, "SSH backup completed.",
+            # Bring up Tailscale before SSH if enabled
+            if ts_enabled:
+                if not ts_auth_key:
+                    logger.error("Tailscale enabled but no auth key provided. "
+                                 "Set --tailscale-authkey or [TAILSCALE] auth_key in config.")
+                    _notify(logger, telegram_bot, notifications,
+                            "SSH backup aborted: Tailscale auth key missing.",
+                            config_values=config_values)
+                else:
+                    _ts_brought_up = tailscale_up(
+                        ts_auth_key, logger=logger, hostname=ts_hostname,
+                        advertise_tags=ts_tags, accept_routes=ts_accept_routes)
+                    if not _ts_brought_up:
+                        logger.error("Failed to establish Tailscale connection. Aborting SSH backup.")
+                        _notify(logger, telegram_bot, notifications,
+                                "SSH backup aborted: Tailscale connection failed.",
+                                config_values=config_values)
+
+            # Only proceed with SSH if Tailscale is not required or connected successfully
+            if not ts_enabled or _ts_brought_up:
+                _notify(logger, telegram_bot, notifications,
+                        f"Starting SSH backup{' via Tailscale' if ts_enabled else ''}...",
                         config_values=config_values)
-            except Exception as e:
-                logger.error(f"SSH backup failed: {e}")
-                _notify(logger, telegram_bot, notifications, "SSH backup failed.",
-                        config_values=config_values)
+                logger.info("Running SSH backup...")
+                try:
+                    sync_ssh_servers_concurrently(source_dir, ssh_servers, username=ssh_username or '',
+                                                  password=ssh_password, logger=logger,
+                                                  exclude_patterns=exclude_patterns,
+                                                  manifest=manifest,
+                                                  bandwidth_limit=bandwidth_limit)
+                    _notify(logger, telegram_bot, notifications, "SSH backup completed.",
+                            config_values=config_values)
+                except Exception as e:
+                    logger.error(f"SSH backup failed: {e}")
+                    _notify(logger, telegram_bot, notifications, "SSH backup failed.",
+                            config_values=config_values)
+                finally:
+                    # Disconnect Tailscale after SSH backup if configured
+                    if ts_enabled and _ts_brought_up and ts_disconnect_after:
+                        tailscale_down(logger=logger)
 
     if operation_modes and ('s3' in operation_modes):
         if not s3_bucket:
