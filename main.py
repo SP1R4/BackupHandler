@@ -51,6 +51,7 @@ from src.email_notify import send_smtp_email
 from src.dedup import deduplicate_backup_dirs
 from src.webhook_notify import send_webhook
 from src.tailscale import tailscale_up, tailscale_down, get_tailscale_status
+from src.snapshot import create_snapshot, generate_restore_script, diff_snapshots
 
 
 # ─── Project Paths ──────────────────────────────────────────────────────────
@@ -242,6 +243,46 @@ def main():
                                           encryption_key_file=enc_key_file)
         all_ok = print_verify_report(results)
         sys.exit(0 if all_ok else 1)
+
+    # Handle --snapshot early exit
+    if args.snapshot:
+        output_path = args.snapshot_output or str(_PROJECT_ROOT / 'snapshots')
+        snapshot_file = create_snapshot(logger, output_dir=output_path)
+        print(f"\nSnapshot saved to: {snapshot_file}")
+        return
+
+    # Handle --restore-snapshot early exit
+    if args.restore_snapshot:
+        output = args.snapshot_output
+        if output is None:
+            snapshot_name = Path(args.restore_snapshot).stem
+            output = str(_PROJECT_ROOT / 'snapshots' / f'{snapshot_name}_restore.sh')
+        script_path = generate_restore_script(logger, args.restore_snapshot, output_path=output)
+        if script_path:
+            print(f"\nRestore script generated: {script_path}")
+            print("Review it, then run: chmod +x restore.sh && sudo ./restore.sh")
+        else:
+            print("Failed to generate restore script.", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # Handle --snapshot-diff early exit
+    if args.snapshot_diff:
+        diff = diff_snapshots(logger, args.snapshot_diff[0], args.snapshot_diff[1])
+        if not diff:
+            print("\nNo differences found between snapshots.")
+        else:
+            print("\n=== Snapshot Diff ===\n")
+            for category, changes in diff.items():
+                added = changes.get('added', [])
+                removed = changes.get('removed', [])
+                print(f"  {category}:")
+                for item in added:
+                    print(f"    + {item}")
+                for item in removed:
+                    print(f"    - {item}")
+                print()
+        return
 
     # Handle --restore early exit
     if args.restore:

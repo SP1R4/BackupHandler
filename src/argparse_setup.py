@@ -29,7 +29,7 @@ def setup_argparse():
     parser.add_argument(
         '--version',
         action='version',
-        version='backup-handler 2.4.0'
+        version='backup-handler 2.5.0'
     )
 
     # Configuration file argument
@@ -177,6 +177,34 @@ def setup_argparse():
         help='Encrypt backup files at rest using AES-256-GCM (overrides config [ENCRYPTION] enabled)'
     )
 
+    # Snapshot options
+    parser.add_argument(
+        '--snapshot',
+        action='store_true',
+        help='Create a system state snapshot (packages, configs, apps) for restore after format'
+    )
+    parser.add_argument(
+        '--restore-snapshot',
+        type=str,
+        default=None,
+        metavar='SNAPSHOT_FILE',
+        help='Generate a restore script from a snapshot JSON file'
+    )
+    parser.add_argument(
+        '--snapshot-output',
+        type=str,
+        default=None,
+        metavar='PATH',
+        help='Output directory or file path for snapshot/restore script'
+    )
+    parser.add_argument(
+        '--snapshot-diff',
+        nargs=2,
+        metavar=('OLD', 'NEW'),
+        default=None,
+        help='Compare two snapshot files and show what changed'
+    )
+
     # Tailscale options
     parser.add_argument(
         '--tailscale',
@@ -242,6 +270,11 @@ def validate_args(args, logger):
     # --restore is mutually exclusive with --scheduled and --backup-mode
     if args.restore and (args.scheduled or args.backup_mode):
         logger.error("--restore cannot be used with --scheduled or --backup-mode.")
+        sys.exit(1)
+
+    # --snapshot and --restore-snapshot are mutually exclusive with backup operations
+    if (args.snapshot or args.restore_snapshot or args.snapshot_diff) and args.backup_mode:
+        logger.error("--snapshot/--restore-snapshot/--snapshot-diff cannot be used with --backup-mode.")
         sys.exit(1)
 
     # Validate email addresses if --receiver is provided
