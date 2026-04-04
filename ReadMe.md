@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-2.3.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.4.0-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
 
 <p align="center">
   A robust, security-hardened backup solution supporting local, SSH/SFTP, S3, and MySQL backups<br>
-  with encryption at rest, deduplication, scheduling, compression, and multi-channel notifications.
+  with Tailscale VPN integration, encryption at rest, deduplication, scheduling, compression, and multi-channel notifications.
 </p>
 
 ---
@@ -27,6 +27,8 @@
 - [Backup Modes](#backup-modes)
 - [Encryption at Rest](#encryption-at-rest)
 - [Deduplication](#deduplication)
+- [Tailscale VPN Integration](#tailscale-vpn-integration)
+- [Pre-flight Checks](#pre-flight-checks)
 - [Backup Verification](#backup-verification)
 - [Restore](#restore)
 - [Retention Policies](#retention-policies)
@@ -56,6 +58,7 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Backup Modes** | Full, incremental, and differential backups with SHA-256 integrity verification |
 | **Local Backups** | Copy files to one or more local backup directories with progress tracking and parallel copies |
 | **Remote Backups (SSH)** | Sync to multiple SSH servers concurrently via SFTP with configurable bandwidth throttling |
+| **Tailscale VPN** | Automatic Tailscale VPN connection with pre-auth keys for secure SSH backups over private tailnets |
 | **Cloud Backups (S3)** | Upload backups to AWS S3 with bandwidth throttling, multipart uploads, and concurrency control |
 | **Database Backups** | MySQL dumps via `mysqldump` with `--single-transaction` support and binary log position tracking |
 | **Encryption at Rest** | AES-256-GCM encryption with parallel processing via ThreadPoolExecutor and progress bars |
@@ -75,6 +78,7 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Dry Run** | Preview all operations without copying, syncing, or modifying anything (including restore) |
 | **Status Dashboard** | View last backup times, directory sizes, and manifest summaries |
 | **Symlink Support** | Symbolic links preserved as links during backup (not dereferenced) |
+| **Pre-flight Checks** | Verifies backup destination mount points are accessible before starting, with notifications on failure |
 | **Instance Locking** | PID lock file prevents duplicate scheduled instances |
 | **Startup Service** | Cross-platform service installation (systemd, launchd, Task Scheduler) |
 | **Integrity** | SHA-256 checksum verification on every copied file, recorded in manifest for later validation |
@@ -87,6 +91,11 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
                     +==============+
                     |   main.py    |  <- CLI entry point & scheduler
                     +======+=======+
+                           |
+                    +------+-------+
+                    | Pre-flight   |  <- Mount & directory checks
+                    | Checks       |
+                    +------+-------+
                            |
         +----------+-------+--------+----------+
         |          |       |        |          |
@@ -101,15 +110,20 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 +--+-++--+--+|  +--+--+ +--+---+ +--+--+ |  +------+--+
 |Copy||SFTP ||  | S3  | |MySQL | |AES- | |  |Retention|
 |    ||     ||  |     | |Dump  | |256  | |  |& Dedup  |
-+----++-----+|  +-----+ +------+ |GCM  | |  +---------+
-             |                   +-----+ |
-    +--------+--------+                  |
-    |        |        |            +-----+-----+
-+---+---+ +--+--+ +---+----+   +--+---+ +-----+--+
-|  Tg   | |SMTP | | Logger |   |Verify| |Restore |
-|  Bot  | |Email| |(rotate)|   |      | |(local/ |
-|       | |     | |        |   |      | |SSH/S3) |
-+---+---+ +-----+ +--------+   +------+ +--------+
++----++--+--+|  +-----+ +------+ |GCM  | |  +---------+
+         |   |                   +-----+ |
+    +----+---+                           |
+    |Tailscale|                          |
+    |(VPN)    |                          |
+    +----+----+                          |
+         |                               |
+    +--------+--------+           +-----+-----+
+    |        |        |           |           |
++---+---+ +--+--+ +---+----+  +--+---+ +-----+--+
+|  Tg   | |SMTP | | Logger |  |Verify| |Restore |
+|  Bot  | |Email| |(rotate)|  |      | |(local/ |
+|       | |     | |        |  |      | |SSH/S3) |
++---+---+ +-----+ +--------+  +------+ +--------+
     |
 +---+----+
 |Webhook |
@@ -143,6 +157,7 @@ backup_handler/
 │   ├── retention.py                 # Age-based and count-based backup cleanup
 │   ├── s3_sync.py                   # AWS S3 upload with bandwidth throttling and multipart
 │   ├── sync.py                      # Local sync, SFTP upload, backup operations
+│   ├── tailscale.py                 # Tailscale VPN management (up/down/status/resolve)
 │   ├── utils.py                     # Checksums, OTP, timestamps, validation
 │   ├── verify.py                    # Backup integrity verification with checksum validation
 │   └── webhook_notify.py            # Webhook notifications (Slack, Discord, Teams, custom)
@@ -283,6 +298,12 @@ All configuration is consolidated into a single `config/config.ini` file. Sensit
 | `[WEBHOOK]` | `url` | No | Webhook URL for notifications (Slack, Discord, Teams, or custom) |
 | `[WEBHOOK]` | `auth_header` | No | Authorization header value (supports `${WEBHOOK_AUTH_TOKEN}`) |
 | `[DEDUP]` | `enabled` | No | Enable file-level deduplication: `True` / `False` |
+| `[TAILSCALE]` | `enabled` | No | Enable Tailscale VPN for SSH backups: `True` / `False` |
+| `[TAILSCALE]` | `auth_key` | When enabled | Pre-authentication key (supports `${TAILSCALE_AUTH_KEY}`) |
+| `[TAILSCALE]` | `hostname` | No | Override machine hostname on the tailnet |
+| `[TAILSCALE]` | `advertise_tags` | No | ACL tags to advertise (e.g. `tag:backup`) |
+| `[TAILSCALE]` | `accept_routes` | No | Accept routes from other Tailscale nodes: `True` / `False` |
+| `[TAILSCALE]` | `disconnect_after` | No | Disconnect Tailscale after SSH backup completes: `True` / `False` |
 | `[SCHEDULE]` | `times` | For `--scheduled` | Comma-separated times in HH:MM format |
 | `[SCHEDULE]` | `interval_minutes` | No | Scheduler check interval in minutes (default: `60`) |
 | `[MODES]` | `local` | **Yes** | Enable local backups: `True` / `False` |
@@ -379,6 +400,15 @@ python main.py --operation-modes s3 --backup-mode full \
 python main.py --operation-modes db --backup-mode full \
   --source-dir /data --backup-dirs /backups
 
+# SSH backup via Tailscale VPN (connect with pre-auth key)
+python main.py --operation-modes ssh --backup-mode full \
+  --source-dir /data --ssh-servers my-server \
+  --tailscale --tailscale-authkey tskey-auth-xxxxx
+
+# SSH backup via Tailscale using config (set [TAILSCALE] in config.ini)
+python main.py --operation-modes ssh --backup-mode full \
+  --source-dir /data --ssh-servers my-tailscale-host
+
 # Combined local + SSH + S3 with notifications
 python main.py --operation-modes local ssh s3 --backup-mode full \
   --source-dir /data --backup-dirs /backups \
@@ -455,6 +485,8 @@ python main.py --profile production --operation-modes local --backup-mode full \
 | `--dedup` | Enable file-level deduplication via hardlinks |
 | `--exclude PATTERNS` | Comma-separated glob patterns to exclude |
 | `--retain N` | Keep only N most recent backups per directory |
+| `--tailscale` | Enable Tailscale VPN for SSH backups (connects using pre-auth key) |
+| `--tailscale-authkey KEY` | Tailscale pre-auth key (overrides config `[TAILSCALE] auth_key`) |
 | `--scheduled` | Run in scheduled mode using config times |
 | `--notifications` | Enable Telegram & email notifications |
 | `--receiver EMAIL [EMAIL ...]` | Email recipients for notifications |
@@ -549,6 +581,66 @@ File-level deduplication uses SHA-256 hashing and hardlinks to eliminate duplica
 - Runs after encryption in the backup pipeline
 
 Enable via config (`[DEDUP] enabled = True`) or CLI (`--dedup`).
+
+---
+
+## Tailscale VPN Integration
+
+Backup Handler can automatically connect to a Tailscale tailnet before SSH backups, allowing secure remote backups over a private WireGuard-based VPN without exposing SSH ports to the public internet.
+
+### How it works
+
+1. Before SSH backup starts, Backup Handler checks Tailscale status
+2. If not already connected, it brings Tailscale up using your pre-auth key
+3. SSH servers are reached via their Tailscale hostnames or IPs on the tailnet
+4. After backup completes, Tailscale can optionally disconnect (`disconnect_after = True`)
+
+### Configuration
+
+```ini
+[TAILSCALE]
+enabled = True
+auth_key = ${TAILSCALE_AUTH_KEY}
+hostname = backup-machine
+advertise_tags = tag:backup
+accept_routes = False
+disconnect_after = False
+```
+
+### CLI Usage
+
+```bash
+# Enable Tailscale with auth key from CLI
+python main.py --operation-modes ssh --backup-mode full \
+  --source-dir /data --ssh-servers my-tailscale-host \
+  --tailscale --tailscale-authkey tskey-auth-xxxxx
+
+# Or use config — just pass --tailscale to override config enabled=False
+python main.py --operation-modes ssh --backup-mode full \
+  --source-dir /data --ssh-servers my-tailscale-host --tailscale
+```
+
+### Pre-auth Keys
+
+Generate pre-auth keys at [Tailscale Admin Console](https://login.tailscale.com/admin/settings/keys). For automated backups, use **reusable** keys with an appropriate expiration. Store the key securely using environment variable syntax (`${TAILSCALE_AUTH_KEY}`).
+
+### Requirements
+
+- Tailscale must be installed on the machine (`tailscale` CLI available in PATH)
+- `sudo` access is required for `tailscale up` / `tailscale down` commands
+- The SSH servers must be reachable on the tailnet (either by Tailscale hostname or IP)
+
+---
+
+## Pre-flight Checks
+
+Before any backup operation starts, Backup Handler verifies that all backup destinations are accessible:
+
+- **Mount point detection**: For paths under `/mnt/` (e.g., `/mnt/data/backups`), checks that the mount point is actually mounted using `os.path.ismount()`
+- **Directory creation**: If the mount is available but the backup directory doesn't exist, it's created automatically
+- **Failure notification**: If destinations are inaccessible, the backup aborts immediately with a clear error and sends notifications (Telegram, SMTP, webhook) so you know right away
+
+This prevents the common scenario where an external disk becomes unmounted and backups silently fail for days.
 
 ---
 
@@ -771,6 +863,11 @@ Logs are written to `Logs/application.log` with automatic rotation:
 | Deduplication not saving space | Hardlinks only work within the same filesystem — ensure backup dirs share a mount |
 | Verification shows all files missing | Ensure the backup was made with manifests enabled (v2.0.0+) |
 | Checksum mismatches during verification | Files may have been modified after backup. Re-run a full backup |
+| `Tailscale is not installed` | Install Tailscale: `curl -fsSL https://tailscale.com/install.sh \| sh` |
+| `Failed to bring Tailscale up` | Verify auth key is valid and not expired. Check `sudo tailscale up` works manually |
+| `Tailscale auth key missing` | Set `--tailscale-authkey` or `[TAILSCALE] auth_key` in config |
+| `Backup aborted: destination(s) inaccessible` | The backup disk is not mounted. Mount it and retry |
+| `Mount point /mnt/data is not mounted` | Mount the disk: `sudo mount /dev/sdX /mnt/data`. Consider adding to `/etc/fstab` |
 
 ---
 
