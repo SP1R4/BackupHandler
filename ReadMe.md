@@ -34,6 +34,8 @@
 - [Restore](#restore)
 - [Retention Policies](#retention-policies)
 - [Running as a Startup Service](#running-as-a-startup-service)
+- [Restore Drill](#restore-drill)
+- [Operations Runbook](#operations-runbook)
 - [Notifications](#notifications)
 - [Security](#security)
 - [Logging](#logging)
@@ -825,24 +827,44 @@ Both policies can be active simultaneously. Retention runs after encryption and 
 
 Backup Handler can run as a system service so backups start automatically on boot.
 
-### Linux (systemd)
+### Linux (systemd) — recommended for production
+
+Hardened oneshot service + timer live in `contrib/systemd/`. The service
+runs under an unprivileged `backup` user with `ProtectSystem=strict`,
+`MemoryDenyWriteExecute`, and a `SystemCallFilter` allowlist. The timer
+fires daily at 03:00 with 15-minute jitter and catches up on missed runs
+after a reboot.
 
 ```bash
-# Automatic installation
-bash scripts/install_service.sh
+# 1. Create the unprivileged operator account and its state dir:
+sudo useradd --system --home /var/lib/backup-handler \
+     --shell /usr/sbin/nologin backup
+sudo install -d -o backup -g backup -m 0750 /var/lib/backup-handler/Logs
 
-# Or manually:
-# 1. Edit scripts/backup-handler.service — replace __PROJECT_DIR__ and __USER__
-# 2. Copy and enable:
-sudo cp scripts/backup-handler.service /etc/systemd/system/
+# 2. Install and enable the unit + timer (edit override.conf for local paths):
+sudo install -m 0644 contrib/systemd/backup-handler.service /etc/systemd/system/
+sudo install -m 0644 contrib/systemd/backup-handler.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable backup-handler
-sudo systemctl start backup-handler
+sudo systemctl enable --now backup-handler.timer
 
-# Check status
-sudo systemctl status backup-handler
-sudo journalctl -u backup-handler -f
+# 3. Observe:
+systemctl list-timers backup-handler.timer
+journalctl -u backup-handler.service -f
 ```
+
+**Do not `systemctl enable backup-handler.service` directly** — the timer
+owns the schedule. To change the time or environment without editing the
+shipped unit, use `systemctl edit backup-handler.{service,timer}`.
+
+Exit codes from a scheduled run propagate to systemd: `0` success, `2`
+pre-flight failure (mount missing / pre-hook rejected), `3` one or more
+backup modes failed. Non-zero exits leave the unit in `failed` state so
+your monitoring (Prometheus, journal-based alerting, or a heartbeat —
+see below) can page an operator.
+
+The legacy `scripts/backup-handler.service` helper is still present for
+the `install_service.sh` wrapper, but new deployments should use the
+hardened `contrib/systemd/` units.
 
 ### macOS (launchd)
 
@@ -870,6 +892,48 @@ launchctl list | grep backup-handler
 Get-ScheduledTask -TaskName "BackupHandler"
 Start-ScheduledTask -TaskName "BackupHandler"
 ```
+
+---
+
+## Restore Drill
+
+A backup you have never restored is a backup you do not have. The shipped
+drill proves restorability on a schedule:
+
+```bash
+sudo install -m 0644 contrib/systemd/backup-handler-drill.service /etc/systemd/system/
+sudo install -m 0644 contrib/systemd/backup-handler-drill.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now backup-handler-drill.timer
+```
+
+The drill runs weekly (`Sun 04:30` by default, override with
+`systemctl edit backup-handler-drill.timer`). Each run:
+
+1. Picks the most recent `backup_manifest_*.json` from the first
+   configured `backup_dirs` entry.
+2. Performs a dry-run restore into `/tmp/backup-drill` and bails if that
+   fails.
+3. Performs a real restore, then `--verify` checks every file's SHA-256
+   against the manifest.
+4. Optionally pings a webhook with pass/fail (set `DRILL_WEBHOOK_URL` in
+   a drop-in).
+
+Exit codes: `0` pass, `1` config problem, `2` restore failed, `3` verify
+failed, `4` drill passed but notification failed. **A failed drill is a
+higher-severity incident than a failed backup** — the backups are
+untrusted until a drill passes.
+
+---
+
+## Operations Runbook
+
+Step-by-step procedures for every restore scenario (full-host,
+single-file, MySQL point-in-time, encrypted archive, system snapshot)
+plus failure-triage flowcharts by exit code live in
+[RUNBOOK.md](RUNBOOK.md). Written for a junior on-call at 3am — if a
+command in the runbook does not match reality, update the runbook in the
+same PR as the fix.
 
 ---
 
@@ -901,6 +965,26 @@ The bot sends notifications for:
 url = https://your-webhook-endpoint.example.com/webhook
 auth_header = ${WEBHOOK_AUTH_TOKEN}
 ```
+
+### Heartbeat (dead-man's-switch)
+
+Webhook / Telegram / SMTP alerts require the host to still be alive and
+networked to report a failure. The heartbeat inverts that: on every
+**successful** run the handler pings an external watchdog
+(healthchecks.io, Dead Man's Snitch, Uptime Kuma, etc). A **missed**
+ping is what pages the operator — so a powered-off host, a disabled
+timer, or a pre-flight network partition all surface automatically.
+
+Partial-success runs do not ping, which prevents a limping backup from
+resetting the watchdog window.
+
+```ini
+[HEARTBEAT]
+url = https://hc-ping.com/your-check-uuid
+timeout = 10
+```
+
+Scheme is restricted to `http` / `https` (SSRF / `file://` protection).
 
 ### CLI Receiver Emails
 - Pass `--receiver email1@example.com email2@example.com` to send one-off notifications
