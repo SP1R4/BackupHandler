@@ -1,0 +1,12 @@
+# Default owner for everything in the repo
+*                               @SP1R4
+
+# Security-sensitive areas require explicit review
+/src/encryption.py              @SP1R4
+/src/config.py                  @SP1R4
+/src/tailscale.py               @SP1R4
+/src/webhook_notify.py          @SP1R4
+SECURITY.md                     @SP1R4
+/.github/workflows/             @SP1R4
+pyproject.toml                  @SP1R4
+requirements.txt                @SP1R4

@@ -13,10 +13,13 @@ excluded from encryption and deduplication to remain accessible without
 decryption keys.
 """
 
+from __future__ import annotations
+
 import json
 import time
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 
 
 class BackupManifest:
@@ -31,31 +34,36 @@ class BackupManifest:
         manifest.save('/backups/daily')
     """
 
-    def __init__(self, mode='full'):
+    def __init__(self, mode: str = 'full') -> None:
         self._start_time = time.time()
         self._mode = mode
-        self._copied = []
-        self._skipped = []
-        self._failed = []
+        self._copied: list[dict[str, Any]] = []
+        self._skipped: list[dict[str, Any]] = []
+        self._failed: list[dict[str, Any]] = []
         self._total_bytes = 0
 
-    def record_copy(self, file_path, size_bytes, checksum=None):
+    def record_copy(
+        self,
+        file_path: Path | str,
+        size_bytes: int,
+        checksum: Optional[str] = None,
+    ) -> None:
         """Record a successfully copied file with optional SHA-256 checksum."""
-        entry = {'path': str(file_path), 'size': size_bytes}
+        entry: dict[str, Any] = {'path': str(file_path), 'size': size_bytes}
         if checksum:
             entry['checksum'] = checksum
         self._copied.append(entry)
         self._total_bytes += size_bytes
 
-    def record_skip(self, file_path):
+    def record_skip(self, file_path: Path | str) -> None:
         """Record a skipped (unchanged) file."""
         self._skipped.append({'path': str(file_path)})
 
-    def record_failure(self, file_path, reason):
+    def record_failure(self, file_path: Path | str, reason: str) -> None:
         """Record a failed file operation."""
         self._failed.append({'path': str(file_path), 'reason': reason})
 
-    def save(self, output_dir):
+    def save(self, output_dir: Path | str) -> Path:
         """
         Write the manifest JSON to output_dir.
 
@@ -90,7 +98,7 @@ class BackupManifest:
 
         return manifest_path
 
-    def summary(self):
+    def summary(self) -> dict[str, Any]:
         """Return a summary dict (without per-file details)."""
         duration = time.time() - self._start_time
         return {
@@ -103,7 +111,7 @@ class BackupManifest:
         }
 
 
-def load_latest_manifest(directory):
+def load_latest_manifest(directory: Path | str) -> Optional[dict[str, Any]]:
     """
     Load the most recent backup manifest from a directory.
 
@@ -121,7 +129,7 @@ def load_latest_manifest(directory):
         return json.load(f)
 
 
-def load_manifests_up_to(directory, timestamp):
+def load_manifests_up_to(directory: Path | str, timestamp: str) -> list[dict[str, Any]]:
     """
     Load all manifests up to (and including) the given timestamp, sorted chronologically.
 

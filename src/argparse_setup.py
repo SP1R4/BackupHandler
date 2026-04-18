@@ -9,6 +9,8 @@ dependencies after parsing.
 
 import sys
 import argparse
+
+from src.__version__ import __version__
 from src.utils import is_valid_email
 
 
@@ -29,7 +31,7 @@ def setup_argparse():
     parser.add_argument(
         '--version',
         action='version',
-        version='backup-handler 2.5.0'
+        version=f'backup-handler {__version__}'
     )
 
     # Configuration file argument
