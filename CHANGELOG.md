@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Hardened systemd unit + timer pair in `contrib/systemd/`
+  (`backup-handler.service` / `.timer`). Runs under an unprivileged
+  `backup` user with `ProtectSystem=strict`, `MemoryDenyWriteExecute`,
+  and a `SystemCallFilter` allowlist.
+- Weekly restore-drill systemd pair
+  (`backup-handler-drill.service` / `.timer`) that exercises the full
+  restore path and verifies every file's checksum. Failed drills are a
+  higher-severity incident than failed backups.
+- `scripts/restore_drill.sh` — picks the latest manifest, dry-runs,
+  restores to a scratch dir, verifies, and optionally pings a webhook.
+  Exit codes `0`/`1`/`2`/`3`/`4` distinguish pass, config, restore,
+  verify, and notification failures.
+- `RUNBOOK.md` — step-by-step procedures for full-host, single-file,
+  MySQL PITR, encrypted archive, and system-snapshot restores, plus
+  failure triage by exit code.
+- `[HEARTBEAT]` config section and `src/heartbeat.py`: optional
+  dead-man's-switch ping on successful runs
+  (healthchecks.io / Dead Man's Snitch / Uptime Kuma compatible).
+  Scheme is restricted to `http`/`https`.
 - `pyproject.toml` with full tooling configuration (ruff, black, mypy,
   pytest, coverage, bandit).
 - `SECURITY.md` with disclosure policy and hardening guidance.
@@ -28,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `main.backup_operation` now returns a process exit code
+  (`0` / `2` / `3`) and per-mode failures (local / SSH / S3 / DB) are
+  tracked individually. A partial-success run exits non-zero so systemd
+  and Prometheus alerting can page an operator. Silent pre-flight and
+  pre-hook failure paths now propagate non-zero.
+- `update_last_backup_time()` only advances on full success — a partial
+  failure no longer skews future incremental-window calculations.
 - OTP / zip-password generation (`utils.generate_otp`) now uses `secrets`
   (CSPRNG) instead of `random`, and defaults to 16 characters.
 - Webhook URLs are validated against an `http`/`https` allowlist before
