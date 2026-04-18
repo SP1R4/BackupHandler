@@ -1,0 +1,18 @@
+# Restore-drill timer. Runs weekly by default; quarterly is the compliance
+# minimum, weekly is the "we actually sleep at night" minimum.
+#
+# Override with:
+#   systemctl edit backup-handler-drill.timer
+
+[Unit]
+Description=Weekly restore drill for backup-handler
+Requires=backup-handler-drill.service
+
+[Timer]
+Unit=backup-handler-drill.service
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

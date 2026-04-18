@@ -217,6 +217,13 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
         webhook_url = normalize_none(config.get('WEBHOOK', 'url', fallback=None))
         webhook_auth_header = normalize_none(config.get('WEBHOOK', 'auth_header', fallback=None))
 
+        # Heartbeat / dead-man's-switch config (healthchecks.io, Dead Man's Snitch, etc).
+        # On a successful run, we ping the URL. If the ping is missed, the external
+        # service pages an operator — this catches silent failures like the host
+        # being off or the unit being disabled.
+        heartbeat_url = normalize_none(config.get('HEARTBEAT', 'url', fallback=None))
+        heartbeat_timeout = config.getint('HEARTBEAT', 'timeout', fallback=10)
+
         # Tailscale config
         tailscale_enabled = config.getboolean('TAILSCALE', 'enabled', fallback=False)
         tailscale_auth_key = normalize_none(config.get('TAILSCALE', 'auth_key', fallback=None))
@@ -277,6 +284,8 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             'dedup_enabled': dedup_enabled,
             'webhook_url': webhook_url,
             'webhook_auth_header': webhook_auth_header,
+            'heartbeat_url': heartbeat_url,
+            'heartbeat_timeout': max(1, heartbeat_timeout),
             'tailscale_enabled': tailscale_enabled,
             'tailscale_auth_key': tailscale_auth_key,
             'tailscale_hostname': tailscale_hostname,
@@ -372,6 +381,10 @@ def extract_config_values(logger, config_file_path, show=False, require_schedule
             print("WEBHOOK:")
             print(f"  URL          : {config_vars['webhook_url'] or 'Not Set'}")
             print(f"  Auth Header  : {'Set' if config_vars['webhook_auth_header'] else 'Not Set'}\n")
+
+            print("HEARTBEAT:")
+            print(f"  URL          : {config_vars['heartbeat_url'] or 'Not Set'}")
+            print(f"  Timeout (s)  : {config_vars['heartbeat_timeout']}\n")
 
             print("NOTIFICATIONS:")
             print(f"  Bot             : {'Enabled' if config_vars['bot'] else 'Disabled'}")

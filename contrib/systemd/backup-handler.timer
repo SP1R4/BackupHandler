@@ -1,0 +1,24 @@
+# backup-handler timer — fires the .service unit on a schedule.
+#
+# Runs daily at 03:00 with a 15-minute random jitter to avoid thundering-herd
+# when many hosts share the same schedule. Catches up on missed runs (e.g.
+# the machine was off) on next boot.
+#
+# Override the schedule for your environment with:
+#   systemctl edit backup-handler.timer
+
+[Unit]
+Description=backup-handler scheduled runs
+Documentation=https://github.com/SP1R4/BackupHandler
+Requires=backup-handler.service
+
+[Timer]
+Unit=backup-handler.service
+
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=15m
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

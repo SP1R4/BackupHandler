@@ -3,6 +3,8 @@ skili/
 otp.json
 stored_passwords.txt
 *.log
+Logs/
+snapshots/
 __pycache__/
 BackupTimestamp/
 interacted_users_ids.json

@@ -152,6 +152,18 @@ url = None
 # Supports env var syntax: auth_header = ${WEBHOOK_AUTH_TOKEN}
 auth_header = None
 
+[HEARTBEAT]
+# OPTIONAL: Dead-man's-switch ping URL. On every successful backup run we
+# send a GET to this URL. If the external service (healthchecks.io, Dead
+# Man's Snitch, Uptime Kuma, etc.) does not see a ping inside its expected
+# window, it pages an operator. This catches silent failures the host
+# itself cannot report (machine off, unit disabled, network partition).
+# Only full-success runs ping — partial failures must not reset the window.
+# Must be http:// or https://.
+url = None
+# OPTIONAL: Ping request timeout in seconds. Default 10.
+timeout = 10
+
 [NOTIFICATIONS]
 # OPTIONAL: Enable Telegram bot notifications (True/False)
 bot = True
