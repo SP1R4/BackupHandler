@@ -1,0 +1,104 @@
+# backup-handler one-shot unit.
+#
+# Paired with backup-handler.timer for scheduled runs. Do NOT `systemctl
+# enable` this unit directly — enable the timer instead.
+#
+# Install:
+#   install -m 0644 contrib/systemd/backup-handler.service /etc/systemd/system/
+#   install -m 0644 contrib/systemd/backup-handler.timer   /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now backup-handler.timer
+#
+# Before enabling, create the unprivileged operator account and grant it
+# the minimum filesystem permissions it needs:
+#
+#   useradd --system --home /var/lib/backup-handler \
+#           --shell /usr/sbin/nologin backup
+#   install -d -o backup -g backup -m 0750 /var/lib/backup-handler/Logs
+#   install -d -o backup -g backup -m 0750 /var/lib/backup-handler/BackupTimestamp
+#
+# Override environment or extra flags via:
+#   systemctl edit backup-handler.service
+# which creates /etc/systemd/system/backup-handler.service.d/override.conf.
+
+[Unit]
+Description=backup-handler scheduled backup run
+Documentation=https://github.com/SP1R4/BackupHandler
+After=network-online.target local-fs.target
+Wants=network-online.target
+# Fail fast if the backup source or destination isn't mounted.
+RequiresMountsFor=/var/lib/backup-handler
+
+[Service]
+Type=oneshot
+User=backup
+Group=backup
+
+WorkingDirectory=/opt/backup-handler
+ExecStart=/opt/backup-handler/venv/bin/backup-handler --scheduled
+
+# Log correlation + structured JSON output go to journald by default.
+Environment=BACKUP_HANDLER_LOG_JSON=1
+# Uncomment if you want to mirror logs to /dev/log as well:
+#Environment=BACKUP_HANDLER_LOG_SYSLOG=1
+
+# Never let a backup run longer than the scheduling window.
+TimeoutStartSec=12h
+
+# Conservative sandbox. Loosen the read/write paths for your deployment
+# via a drop-in if you need broader access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+PrivateTmp=true
+PrivateUsers=true
+
+# Writable state. Add every destination path your config writes to.
+ReadWritePaths=/var/lib/backup-handler
+#ReadWritePaths=/srv/backups
+#ReadWritePaths=/mnt/nas-01
+
+# Network is required for SSH / S3 / webhook / tailscale modes.
+#RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Resource caps. Tune to your environment.
+MemoryHigh=2G
+MemoryMax=4G
+TasksMax=512
+
+# Auto-restart only on abnormal exit (signal, crash). Config or
+# business-logic failures (non-zero exit) should page the operator, not
+# silently re-run.
+Restart=on-abnormal
+RestartSec=30s
+
+# Clean exit even if the oneshot leaves a lingering lock on crash.
+SuccessExitStatus=0
+
+# Ship stderr to the journal with a stable ident so log filters work.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backup-handler
+
+[Install]
+# Oneshot units aren't WantedBy anything directly — the timer owns scheduling.
+WantedBy=multi-user.target

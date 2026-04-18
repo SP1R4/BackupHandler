@@ -1,0 +1,36 @@
+# Quarterly (or nightly) restore drill — proves that backups can actually be
+# restored, not just written. Failure of this unit must page an operator.
+#
+# Paired with backup-handler-drill.timer.
+
+[Unit]
+Description=backup-handler restore drill
+Documentation=file:///opt/backup-handler/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=backup
+Group=backup
+WorkingDirectory=/opt/backup-handler
+
+ExecStart=/opt/backup-handler/scripts/restore_drill.sh
+
+Environment=BACKUP_HANDLER_LOG_JSON=1
+
+TimeoutStartSec=4h
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/backup-handler /tmp/backup-drill
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backup-handler-drill
+
+[Install]
+WantedBy=multi-user.target

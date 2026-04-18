@@ -50,6 +50,7 @@ from src.verify import verify_backup_integrity, print_verify_report
 from src.email_notify import send_smtp_email
 from src.dedup import deduplicate_backup_dirs
 from src.webhook_notify import send_webhook
+from src.heartbeat import send_heartbeat
 from src.tailscale import tailscale_up, tailscale_down, get_tailscale_status
 from src.snapshot import create_snapshot, generate_restore_script, diff_snapshots
 
@@ -370,7 +371,7 @@ def main():
             logger.error(f"Failed to load configuration file: {config_path}. Error: {e}")
             sys.exit(1)
     else:
-        backup_operation(logger,
+        rc = backup_operation(logger,
                          source_dir=args.source_dir,
                          backup_dirs=args.backup_dirs,
                          ssh_servers=args.ssh_servers,
@@ -389,6 +390,8 @@ def main():
                          dedup=args.dedup,
                          tailscale=args.tailscale,
                          tailscale_authkey=args.tailscale_authkey)
+        if rc:
+            sys.exit(rc)
 
 
 # ─── Scheduled Mode ─────────────────────────────────────────────────────────
@@ -489,7 +492,7 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
                     operation_modes.append('s3')
                 if config_values.get('db_mode'):
                     operation_modes.append('db')
-                backup_operation(logger,
+                rc = backup_operation(logger,
                                  source_dir=config_values['source_dir'],
                                  backup_dirs=config_values['backup_dirs'],
                                  ssh_servers=config_values.get('ssh_servers'),
@@ -505,6 +508,8 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
                                  retain=retain,
                                  config_path=None,
                                  config_values=config_values)
+                if rc:
+                    logger.error(f"Scheduled run returned exit code {rc}; scheduler continues.")
             else:
                 logger.info("No scheduled time matched.")
             # Wait for 30 seconds before checking again (matches tolerance window)
@@ -573,14 +578,18 @@ def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn, confi
     Execute a backup function with standardized notification and error handling.
 
     Wraps the actual backup call in a try/except to ensure failure notifications
-    are always sent, even if the backup raises an unexpected exception.
+    are always sent, even if the backup raises an unexpected exception. Returns
+    True on success, False on failure so the caller can track partial failures
+    and propagate a non-zero exit code.
     """
     try:
         backup_fn()
         _notify(logger, telegram_bot, notifications, f"Local {mode_name} backup completed.", config_values=config_values)
+        return True
     except Exception as e:
         logger.error(f"{mode_name.capitalize()} backup failed: {e}")
         _notify(logger, telegram_bot, notifications, f"{mode_name.capitalize()} backup failed.", config_values=config_values)
+        return False
 
 
 
@@ -641,11 +650,18 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
       9. Send completion notification
 
     All parameters can be sourced from CLI args, config file, or both (CLI wins).
+
+    Returns a process exit code:
+      0 - all selected modes succeeded (or dry-run / show-setup completed)
+      2 - pre-flight failure (backup dir inaccessible, pre-hook failed)
+      3 - at least one backup mode failed
+    Callers (main / scheduled_operation) decide whether to ``sys.exit()`` or
+    continue looping.
     """
     # Show setup command (skip validation so incomplete configs can be inspected)
     if show_setup:
         extract_config_values(logger, config_path or CONFIG_PATH, show=True, skip_validation=True)
-        return
+        return 0
 
     # Load config values if not provided (for hooks, retention, parallel, bandwidth, S3)
     if config_values is None and config_path:
@@ -669,7 +685,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                    f"Check that the disk is mounted.")
             logger.error(msg)
             _notify(logger, telegram_bot, notifications, msg, config_values=config_values)
-            return
+            return 2
 
     # Hooks
     pre_hook = config_values.get('pre_backup_hook')
@@ -698,7 +714,11 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             logger.error("Pre-backup hook failed. Aborting backup.")
             _notify(logger, telegram_bot, notifications, "Backup aborted: pre-backup hook failed.",
                     config_values=config_values)
-            return
+            return 2
+
+    # Track per-mode failures so we can exit non-zero if any mode failed.
+    # Systemd and Prometheus rely on this to page an operator.
+    mode_failures: list[str] = []
 
     # Create manifest for this backup run
     manifest = BackupManifest(mode=backup_mode or 'full')
@@ -723,37 +743,41 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 logger.error("Invalid option for incremental backup.")
                 sys.exit(1)
             last_backup_time = get_last_backup_time()
-            _run_backup(logger, telegram_bot, notifications, "incremental",
+            if not _run_backup(logger, telegram_bot, notifications, "incremental",
                         lambda: perform_incremental_backup(logger, source_dir, backup_dirs,
                                                            last_backup_time, bot=telegram_bot,
                                                            receiver_emails=receiver,
                                                            exclude_patterns=exclude_patterns,
                                                            manifest=manifest),
-                        config_values=config_values)
+                        config_values=config_values):
+                mode_failures.append("local-incremental")
         elif backup_mode == 'differential':
             if compress:
                 logger.error("Invalid option for differential backup.")
                 sys.exit(1)
             last_full_backup_time = get_last_full_backup_time()
-            _run_backup(logger, telegram_bot, notifications, "differential",
+            if not _run_backup(logger, telegram_bot, notifications, "differential",
                         lambda: perform_differential_backup(logger, source_dir, backup_dirs,
                                                             last_full_backup_time, bot=telegram_bot,
                                                             receiver_emails=receiver,
                                                             exclude_patterns=exclude_patterns,
                                                             manifest=manifest),
-                        config_values=config_values)
+                        config_values=config_values):
+                mode_failures.append("local-differential")
         else:
             _notify(logger, telegram_bot, notifications, "Starting full backup...",
                     config_values=config_values)
-            _run_backup(logger, telegram_bot, notifications, "full",
+            if _run_backup(logger, telegram_bot, notifications, "full",
                         lambda: perform_full_backup(logger, source_dir, backup_dirs,
                                                      compress=compress, bot=telegram_bot,
                                                      receiver_emails=receiver,
                                                      exclude_patterns=exclude_patterns,
                                                      manifest=manifest,
                                                      parallel_copies=parallel_copies),
-                        config_values=config_values)
-            update_last_full_backup_time()
+                        config_values=config_values):
+                update_last_full_backup_time()
+            else:
+                mode_failures.append("local-full")
 
     # Resolve Tailscale settings (CLI flags override config)
     ts_enabled = tailscale or config_values.get('tailscale_enabled', False)
@@ -781,6 +805,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                     _notify(logger, telegram_bot, notifications,
                             "SSH backup aborted: Tailscale auth key missing.",
                             config_values=config_values)
+                    mode_failures.append("ssh")
                 else:
                     _ts_brought_up = tailscale_up(
                         ts_auth_key, logger=logger, hostname=ts_hostname,
@@ -790,6 +815,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                         _notify(logger, telegram_bot, notifications,
                                 "SSH backup aborted: Tailscale connection failed.",
                                 config_values=config_values)
+                        mode_failures.append("ssh")
 
             # Only proceed with SSH if Tailscale is not required or connected successfully
             if not ts_enabled or _ts_brought_up:
@@ -809,6 +835,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                     logger.error(f"SSH backup failed: {e}")
                     _notify(logger, telegram_bot, notifications, "SSH backup failed.",
                             config_values=config_values)
+                    mode_failures.append("ssh")
                 finally:
                     # Disconnect Tailscale after SSH backup if configured
                     if ts_enabled and _ts_brought_up and ts_disconnect_after:
@@ -838,6 +865,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 logger.error(f"S3 backup failed: {e}")
                 _notify(logger, telegram_bot, notifications, "S3 backup failed.",
                         config_values=config_values)
+                mode_failures.append("s3")
 
     if operation_modes and ('db' in operation_modes):
         db_database = config_values.get('db_database')
@@ -857,10 +885,12 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 else:
                     _notify(logger, telegram_bot, notifications, "Database backup failed.",
                             config_values=config_values)
+                    mode_failures.append("db")
             except Exception as e:
                 logger.error(f"Database backup failed: {e}")
                 _notify(logger, telegram_bot, notifications, "Database backup failed.",
                         config_values=config_values)
+                mode_failures.append("db")
 
     if dry_run:
         # Show encryption info in dry-run
@@ -873,7 +903,7 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
             print("[DRY RUN] Would deduplicate identical files using hardlinks")
         logger.info("[DRY RUN] Complete. No files were modified.")
         print("\n[DRY RUN] Complete. No files were modified.")
-        return
+        return 0
 
     # Save manifest to each backup directory
     if backup_dirs:
@@ -923,8 +953,11 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
         except Exception as e:
             logger.error(f"Deduplication failed: {e}")
 
-    # Update the backup timestamp after successful execution
-    update_last_backup_time()
+    # Update the backup timestamp only if every mode succeeded. A partial
+    # success must not advance the "last good backup" marker — doing so
+    # would let a broken mode silently skew future incremental windows.
+    if not mode_failures:
+        update_last_backup_time()
 
     # Run retention cleanup
     if backup_dirs and (max_age_days > 0 or max_count > 0):
@@ -935,8 +968,28 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
         if not run_hook(logger, post_hook, 'post_backup'):
             logger.warning("Post-backup hook failed (backup itself succeeded).")
 
+    if mode_failures:
+        failed_str = ", ".join(mode_failures)
+        logger.error(f"Backup run finished with failures in: {failed_str}")
+        _notify(logger, telegram_bot, notifications,
+                f"Backup run finished with failures in: {failed_str}",
+                config_values=config_values)
+        return 3
+
     _notify(logger, telegram_bot, notifications, "All backup operations completed successfully.",
             config_values=config_values)
+
+    # Dead-man's-switch ping. Only on full success — a failed run must not
+    # reset the heartbeat window, or the external watchdog will never page.
+    hb_url = config_values.get('heartbeat_url')
+    if hb_url:
+        try:
+            send_heartbeat(logger, hb_url,
+                           timeout=config_values.get('heartbeat_timeout', 10))
+        except Exception as e:
+            logger.error(f"Heartbeat dispatch failed (non-fatal): {e}")
+
+    return 0
 
 if __name__ == "__main__":
     main()
