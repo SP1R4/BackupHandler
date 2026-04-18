@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/SP1R4/BackupHandler/security/advisories/new
+    about: Report a security vulnerability privately (do not use the public tracker).
+  - name: Question / discussion
+    url: https://github.com/SP1R4/BackupHandler/discussions
+    about: Open-ended questions and design discussions belong in Discussions.

@@ -1,0 +1,46 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    groups:
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      runtime:
+        patterns:
+          - "boto3"
+          - "paramiko"
+          - "cryptography"
+          - "requests"
+          - "pyminizip"
+          - "tqdm"
+          - "keyring"
+      dev:
+        patterns:
+          - "ruff"
+          - "black"
+          - "mypy"
+          - "pytest*"
+          - "bandit"
+          - "pip-audit"
+          - "pre-commit"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

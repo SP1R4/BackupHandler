@@ -55,7 +55,7 @@ def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=No
     if bot:
         try:
             bot.send_notification(f"Backup completed for {source_dirs}")
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             logger.error(f"Failed to send Telegram notification: {e}")
 
     # Send email notifications if email addresses are provided
@@ -64,7 +64,7 @@ def sync_directories_with_progress(logger, source_dirs, backup_dirs, compress=No
         body = f"Backup completed for {source_dirs}"
         try:
             send_email(receiver_emails, subject, body, logger=logger)
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             logger.error(f"Failed to send email notification: {e}")
 
 
@@ -120,7 +120,7 @@ def _copy_single_file(logger, file, src_dir, backup_dir, manifest):
             logger.error(f"Checksum verification failed for {file}") if logger else print(f"Checksum verification failed for {file}")
             if manifest:
                 manifest.record_failure(str(file), "Checksum verification failed")
-    except Exception as e:
+    except (OSError, shutil.Error) as e:
         logger.error(f"Failed to backup {file} to {backup_file}: {e}")
         if manifest:
             manifest.record_failure(str(file), str(e))

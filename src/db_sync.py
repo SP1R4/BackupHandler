@@ -119,7 +119,7 @@ def perform_db_backup(logger, config_values, backup_dirs, manifest, dry_run=Fals
             shutil.copy2(dump_path, dest_path)
             manifest.record_copy(str(dest_path), dump_size, checksum=dump_checksum)
             logger.info(f"Database dump copied to {dest_path}")
-        except Exception as e:
+        except (OSError, shutil.Error) as e:
             logger.error(f"Failed to copy database dump to {dest_path}: {e}")
 
     return True
