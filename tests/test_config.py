@@ -41,15 +41,13 @@ class TestEnvVarResolution:
         import configparser
 
         config = configparser.ConfigParser()
-        config.read_string(
-            """
+        config.read_string("""
 [DEFAULT]
 source_dir = /tmp/test
 
 [SSH]
 password = ${TEST_BH_PASS}
-"""
-        )
+""")
         os.environ["TEST_BH_PASS"] = "my_secret"
         try:
             _resolve_all_env_vars(config, logger)

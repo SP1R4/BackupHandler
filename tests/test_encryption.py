@@ -89,5 +89,7 @@ class TestEncryption:
         test_file.write_text("secret data")
         enc_path = encrypt_file(test_file, passphrase="correct")
 
-        with pytest.raises(Exception):
+        from cryptography.exceptions import InvalidTag
+
+        with pytest.raises(InvalidTag):
             decrypt_file(enc_path, passphrase="wrong")

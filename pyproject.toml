@@ -211,4 +211,5 @@ exclude_dirs = ["tests", "venv", "skili", "banner", "bot", "db_backup", "email_n
 skips = [
     "B101",  # assert_used — fine in tests
     "B404",  # subprocess import — audited usage
+    "B603",  # subprocess with list args — audited (no shell, fixed binaries)
 ]

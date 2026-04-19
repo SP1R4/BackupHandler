@@ -14,26 +14,27 @@ manifest history.
 
 import os
 import re
-import stat
 import shutil
+import stat
 import tempfile
 import zipfile
 from pathlib import Path
-from .utils import verify_backup
-from .manifest import load_manifests_up_to
-from .encryption import decrypt_directory
 
+from .encryption import decrypt_directory
+from .manifest import load_manifests_up_to
+from .utils import verify_backup
 
 # ─── Remote Path Detection & Parsing ────────────────────────────────────────
 
+
 def _is_ssh_path(path):
     """Check if a path matches SSH syntax (``user@host:/path`` or ``ssh://...``)."""
-    return bool(re.match(r'^[\w.-]+@[\w.-]+:.+', path) or path.startswith('ssh://'))
+    return bool(re.match(r"^[\w.-]+@[\w.-]+:.+", path) or path.startswith("ssh://"))
 
 
 def _is_s3_path(path):
     """Check if a path matches S3 URI syntax (``s3://bucket/prefix``)."""
-    return path.startswith('s3://')
+    return path.startswith("s3://")
 
 
 def _parse_ssh_path(path):
@@ -47,20 +48,20 @@ def _parse_ssh_path(path):
     Returns:
         tuple: ``(user, host, remote_path)`` where user may be None.
     """
-    if path.startswith('ssh://'):
+    if path.startswith("ssh://"):
         # ssh://user@host/path
         path = path[6:]
-        if '@' in path:
-            user_host, remote = path.split('/', 1) if '/' in path else (path, '')
-            user, host = user_host.split('@', 1)
+        if "@" in path:
+            user_host, remote = path.split("/", 1) if "/" in path else (path, "")
+            user, host = user_host.split("@", 1)
         else:
             user = None
-            host, remote = path.split('/', 1) if '/' in path else (path, '')
-        return user, host, '/' + remote
+            host, remote = path.split("/", 1) if "/" in path else (path, "")
+        return user, host, "/" + remote
     # user@host:/path
-    user_host, remote_path = path.split(':', 1)
-    if '@' in user_host:
-        user, host = user_host.split('@', 1)
+    user_host, remote_path = path.split(":", 1)
+    if "@" in user_host:
+        user, host = user_host.split("@", 1)
     else:
         user, host = None, user_host
     return user, host, remote_path
@@ -76,15 +77,15 @@ def _parse_s3_path(path):
         tuple: ``(bucket, prefix)`` where prefix may be empty.
     """
     stripped = path[5:]  # remove s3://
-    if '/' in stripped:
-        bucket, prefix = stripped.split('/', 1)
+    if "/" in stripped:
+        bucket, prefix = stripped.split("/", 1)
     else:
-        bucket, prefix = stripped, ''
+        bucket, prefix = stripped, ""
     return bucket, prefix
 
 
-
 # ─── Remote Download Handlers ───────────────────────────────────────────────
+
 
 def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
     """
@@ -112,7 +113,9 @@ def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
     logger.info(f"Downloading from SSH: {user}@{host}:{remote_path} -> {local_dir}")
 
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+    # WarningPolicy is deliberate — it logs unknown host keys but still connects.
+    # Upgrade to RejectPolicy + known_hosts once we ship a pinning workflow.
+    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())  # noqa: S507  # nosec B507
 
     try:
         ssh.connect(hostname=host, username=user, password=ssh_password)
@@ -162,8 +165,7 @@ def _sftp_download_recursive(sftp, remote_dir, local_dir, logger):
                 logger.error(f"Failed to download {remote_entry}: {e}")
 
 
-def _download_from_s3(logger, s3_path, local_dir, region=None,
-                      access_key=None, secret_key=None):
+def _download_from_s3(logger, s3_path, local_dir, region=None, access_key=None, secret_key=None):
     """
     Download all objects under an S3 prefix to a local directory.
 
@@ -193,29 +195,26 @@ def _download_from_s3(logger, s3_path, local_dir, region=None,
 
     session_kwargs = {}
     if region:
-        session_kwargs['region_name'] = region
+        session_kwargs["region_name"] = region
     if access_key and secret_key:
-        session_kwargs['aws_access_key_id'] = access_key
-        session_kwargs['aws_secret_access_key'] = secret_key
+        session_kwargs["aws_access_key_id"] = access_key
+        session_kwargs["aws_secret_access_key"] = secret_key
 
-    s3 = boto3.client('s3', **session_kwargs)
+    s3 = boto3.client("s3", **session_kwargs)
     local_dir = Path(local_dir)
 
     try:
-        paginator = s3.get_paginator('list_objects_v2')
-        page_kwargs = {'Bucket': bucket}
+        paginator = s3.get_paginator("list_objects_v2")
+        page_kwargs = {"Bucket": bucket}
         if prefix:
-            page_kwargs['Prefix'] = prefix
+            page_kwargs["Prefix"] = prefix
 
         downloaded = 0
         for page in paginator.paginate(**page_kwargs):
-            for obj in page.get('Contents', []):
-                key = obj['Key']
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
                 # Compute relative path from prefix
-                if prefix:
-                    relative = key[len(prefix):].lstrip('/')
-                else:
-                    relative = key
+                relative = key[len(prefix) :].lstrip("/") if prefix else key
 
                 if not relative:
                     continue
@@ -232,10 +231,19 @@ def _download_from_s3(logger, s3_path, local_dir, region=None,
         return False
 
 
-def restore_backup(logger, from_dir, to_dir, timestamp=None,
-                   encryption_passphrase=None, encryption_key_file=None,
-                   ssh_password=None, s3_region=None, s3_access_key=None,
-                   s3_secret_key=None, dry_run=False):
+def restore_backup(
+    logger,
+    from_dir,
+    to_dir,
+    timestamp=None,
+    encryption_passphrase=None,
+    encryption_key_file=None,
+    ssh_password=None,
+    s3_region=None,
+    s3_access_key=None,
+    s3_secret_key=None,
+    dry_run=False,
+):
     """
     Restore files from a local, SSH, or S3 backup source.
 
@@ -267,17 +275,25 @@ def restore_backup(logger, from_dir, to_dir, timestamp=None,
         with tempfile.TemporaryDirectory() as tmp_dir:
             if not _download_from_ssh(logger, from_dir, tmp_dir, ssh_password=ssh_password):
                 return False
-            return _restore_local(logger, Path(tmp_dir), to_path, timestamp,
-                                  encryption_passphrase, encryption_key_file)
+            return _restore_local(
+                logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file
+            )
 
     # Remote S3 restore
     if _is_s3_path(from_dir):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            if not _download_from_s3(logger, from_dir, tmp_dir, region=s3_region,
-                                     access_key=s3_access_key, secret_key=s3_secret_key):
+            if not _download_from_s3(
+                logger,
+                from_dir,
+                tmp_dir,
+                region=s3_region,
+                access_key=s3_access_key,
+                secret_key=s3_secret_key,
+            ):
                 return False
-            return _restore_local(logger, Path(tmp_dir), to_path, timestamp,
-                                  encryption_passphrase, encryption_key_file)
+            return _restore_local(
+                logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file
+            )
 
     # Local restore
     from_path = Path(from_dir)
@@ -288,29 +304,32 @@ def restore_backup(logger, from_dir, to_dir, timestamp=None,
     to_path.mkdir(parents=True, exist_ok=True)
 
     # ZIP archive restore
-    if from_path.is_file() and from_path.suffix == '.zip':
+    if from_path.is_file() and from_path.suffix == ".zip":
         return _restore_from_zip(logger, from_path, to_path)
 
     # Directory restore
     if from_path.is_dir():
         # Check if backup contains encrypted files
-        has_enc_files = any(from_path.rglob('*.enc'))
+        has_enc_files = any(from_path.rglob("*.enc"))
         if has_enc_files and (encryption_passphrase or encryption_key_file):
             logger.info("Encrypted files detected. Decrypting to temporary directory before restore.")
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_path = Path(tmp_dir)
                 # Copy backup to temp dir to avoid modifying original
-                shutil.copytree(from_path, tmp_path / 'backup', dirs_exist_ok=True)
-                decrypt_dir = tmp_path / 'backup'
-                decrypt_directory(decrypt_dir, passphrase=encryption_passphrase,
-                                  key_file=encryption_key_file, logger=logger)
+                shutil.copytree(from_path, tmp_path / "backup", dirs_exist_ok=True)
+                decrypt_dir = tmp_path / "backup"
+                decrypt_directory(
+                    decrypt_dir, passphrase=encryption_passphrase, key_file=encryption_key_file, logger=logger
+                )
                 if timestamp:
                     return _restore_with_manifests(logger, decrypt_dir, to_path, timestamp)
                 else:
                     return _restore_full_directory(logger, decrypt_dir, to_path)
         elif has_enc_files:
-            logger.warning("Encrypted files detected but no encryption passphrase or key_file configured. "
-                           "Encrypted files will be copied as-is.")
+            logger.warning(
+                "Encrypted files detected but no encryption passphrase or key_file configured. "
+                "Encrypted files will be copied as-is."
+            )
 
         if timestamp:
             return _restore_with_manifests(logger, from_path, to_path, timestamp)
@@ -321,31 +340,33 @@ def restore_backup(logger, from_dir, to_dir, timestamp=None,
     return False
 
 
-
 def _dry_run_restore(logger, from_dir, to_dir, timestamp):
     """Show what a restore would do without modifying any files."""
-    print(f"[DRY RUN] Restore preview:")
+    print("[DRY RUN] Restore preview:")
     print(f"  Source:      {from_dir}")
     print(f"  Destination: {to_dir}")
 
     if _is_ssh_path(from_dir):
-        print(f"  Type:        SSH remote download + local restore")
+        print("  Type:        SSH remote download + local restore")
     elif _is_s3_path(from_dir):
-        print(f"  Type:        S3 download + local restore")
+        print("  Type:        S3 download + local restore")
     else:
         from_path = Path(from_dir)
-        if from_path.is_file() and from_path.suffix == '.zip':
-            print(f"  Type:        ZIP archive extraction")
+        if from_path.is_file() and from_path.suffix == ".zip":
+            print("  Type:        ZIP archive extraction")
         elif from_path.is_dir():
-            files = [f for f in from_path.rglob('*') if f.is_file()
-                     and not (f.name.startswith('backup_manifest_') and f.suffix == '.json')]
-            enc_count = sum(1 for f in files if f.suffix == '.enc')
-            print(f"  Type:        Directory restore")
+            files = [
+                f
+                for f in from_path.rglob("*")
+                if f.is_file() and not (f.name.startswith("backup_manifest_") and f.suffix == ".json")
+            ]
+            enc_count = sum(1 for f in files if f.suffix == ".enc")
+            print("  Type:        Directory restore")
             print(f"  Files:       {len(files)}")
             if enc_count:
                 print(f"  Encrypted:   {enc_count} files")
         else:
-            print(f"  Type:        Unknown source")
+            print("  Type:        Unknown source")
 
     if timestamp:
         print(f"  Timestamp:   {timestamp} (point-in-time restore)")
@@ -357,6 +378,7 @@ def _dry_run_restore(logger, from_dir, to_dir, timestamp):
 
 # ─── Local Restore Handlers ─────────────────────────────────────────────────
 
+
 def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase, encryption_key_file):
     """
     Perform a local restore with automatic encrypted file detection.
@@ -366,11 +388,12 @@ def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase,
     credentials are available, then delegates to full-directory or
     manifest-based restore.
     """
-    has_enc_files = any(from_path.rglob('*.enc'))
+    has_enc_files = any(from_path.rglob("*.enc"))
     if has_enc_files and (encryption_passphrase or encryption_key_file):
         logger.info("Encrypted files detected in downloaded backup. Decrypting before restore.")
-        decrypt_directory(from_path, passphrase=encryption_passphrase,
-                          key_file=encryption_key_file, logger=logger)
+        decrypt_directory(
+            from_path, passphrase=encryption_passphrase, key_file=encryption_key_file, logger=logger
+        )
     elif has_enc_files:
         logger.warning("Encrypted files detected but no encryption credentials. Files will be copied as-is.")
 
@@ -394,7 +417,7 @@ def _restore_from_zip(logger, zip_path, to_dir):
     """
     logger.info(f"Restoring from ZIP archive: {zip_path}")
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
+        with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(to_dir)
         logger.info(f"Successfully restored {zip_path} to {to_dir}")
         return True
@@ -423,8 +446,11 @@ def _restore_full_directory(logger, from_dir, to_dir):
         bool: True if all files were restored without errors.
     """
     logger.info(f"Restoring full directory: {from_dir} -> {to_dir}")
-    files = [f for f in from_dir.rglob('*') if f.is_file()
-             and not (f.name.startswith('backup_manifest_') and f.suffix == '.json')]
+    files = [
+        f
+        for f in from_dir.rglob("*")
+        if f.is_file() and not (f.name.startswith("backup_manifest_") and f.suffix == ".json")
+    ]
 
     copied = 0
     failed = 0
@@ -482,7 +508,9 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
     manifests = load_manifests_up_to(from_dir, timestamp)
 
     if not manifests:
-        logger.warning(f"No manifests found up to timestamp {timestamp}. Falling back to full directory restore.")
+        logger.warning(
+            f"No manifests found up to timestamp {timestamp}. Falling back to full directory restore."
+        )
         return _restore_full_directory(logger, from_dir, to_dir)
 
     logger.info(f"Found {len(manifests)} manifest(s) to apply")
@@ -490,13 +518,13 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
     # Collect all files that were copied (latest version wins)
     files_to_restore = {}
     for manifest in manifests:
-        for entry in manifest.get('copied', []):
-            files_to_restore[entry['path']] = entry
+        for entry in manifest.get("copied", []):
+            files_to_restore[entry["path"]] = entry
 
     copied = 0
     failed = 0
 
-    for file_path, entry in files_to_restore.items():
+    for file_path, _entry in files_to_restore.items():
         src = Path(file_path)
         # Try to find the file in the backup directory structure
         # The manifest records the original source path; the file is stored

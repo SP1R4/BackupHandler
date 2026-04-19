@@ -14,52 +14,57 @@ All backup operations are orchestrated through ``backup_operation()`` which
 handles both one-off CLI invocations and scheduled recurring runs.
 """
 
+import atexit
+import contextlib
+import logging
 import os
+import signal
 import sys
 import time
-import json
-import signal
-import atexit
-import logging
-from colorama import init
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
+from colorama import init
+
+from banner.banner_show import print_banner
+from bot.BotHandler import TelegramBot
+from src.argparse_setup import setup_argparse, validate_args
+from src.config import extract_config_values
+from src.db_sync import perform_db_backup
+from src.dedup import deduplicate_backup_dirs
+from src.email_notify import send_smtp_email
+from src.encryption import encrypt_directory
+from src.heartbeat import send_heartbeat
 
 # ─── Internal Module Imports ────────────────────────────────────────────────
 from src.logger import AppLogger
-from bot.BotHandler import TelegramBot
-from banner.banner_show import print_banner
-from src.config import extract_config_values
-from src.sync import (sync_ssh_servers_concurrently,
-                      perform_full_backup,
-                      perform_incremental_backup,
-                      perform_differential_backup)
-from src.utils import (get_last_backup_time,
-                      update_last_backup_time,
-                      get_last_full_backup_time,
-                      update_last_full_backup_time,
-                      run_hook)
-from src.argparse_setup import setup_argparse, validate_args
 from src.manifest import BackupManifest, load_latest_manifest
-from src.retention import cleanup_old_backups
 from src.restore import restore_backup
+from src.retention import cleanup_old_backups
 from src.s3_sync import sync_to_s3
-from src.encryption import encrypt_directory, decrypt_directory
-from src.db_sync import perform_db_backup
-from src.verify import verify_backup_integrity, print_verify_report
-from src.email_notify import send_smtp_email
-from src.dedup import deduplicate_backup_dirs
+from src.snapshot import create_snapshot, diff_snapshots, generate_restore_script
+from src.sync import (
+    perform_differential_backup,
+    perform_full_backup,
+    perform_incremental_backup,
+    sync_ssh_servers_concurrently,
+)
+from src.tailscale import tailscale_down, tailscale_up
+from src.utils import (
+    get_last_backup_time,
+    get_last_full_backup_time,
+    run_hook,
+    update_last_backup_time,
+    update_last_full_backup_time,
+)
+from src.verify import print_verify_report, verify_backup_integrity
 from src.webhook_notify import send_webhook
-from src.heartbeat import send_heartbeat
-from src.tailscale import tailscale_up, tailscale_down, get_tailscale_status
-from src.snapshot import create_snapshot, generate_restore_script, diff_snapshots
-
 
 # ─── Project Paths ──────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).parent
-CONFIG_PATH = str(_PROJECT_ROOT / 'config' / 'config.ini')
-LOG_PATH = str(_PROJECT_ROOT / 'Logs' / 'application.log')
-LOCK_FILE = _PROJECT_ROOT / '.backup-handler.lock'
+CONFIG_PATH = str(_PROJECT_ROOT / "config" / "config.ini")
+LOG_PATH = str(_PROJECT_ROOT / "Logs" / "application.log")
+LOCK_FILE = _PROJECT_ROOT / ".backup-handler.lock"
 
 
 # ─── Instance Locking ───────────────────────────────────────────────────────
@@ -118,16 +123,16 @@ def _acquire_lock(logger):
 
 def _release_lock():
     """Remove the PID lock file on exit."""
-    try:
+    with contextlib.suppress(OSError):
         LOCK_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+
 
 # Initialize colorama with autoreset to ensure color codes are reset after each print
 init(autoreset=True)
 
 
 # ─── Configuration Resolution ───────────────────────────────────────────────
+
 
 def _resolve_config_path(args):
     """
@@ -137,7 +142,7 @@ def _resolve_config_path(args):
     Profiles resolve to ``config/config.<name>.ini``.
     """
     if args.profile:
-        profile_path = str(_PROJECT_ROOT / 'config' / f'config.{args.profile}.ini')
+        profile_path = str(_PROJECT_ROOT / "config" / f"config.{args.profile}.ini")
         if not os.path.exists(profile_path):
             print(f"Error: Profile config not found: {profile_path}", file=sys.stderr)
             sys.exit(1)
@@ -147,8 +152,8 @@ def _resolve_config_path(args):
     return CONFIG_PATH
 
 
-
 # ─── Status Dashboard ───────────────────────────────────────────────────────
+
 
 def show_status(logger, config_path):
     """
@@ -178,20 +183,20 @@ def show_status(logger, config_path):
         config_values = {}
 
     # Scheduled times
-    schedule_times = config_values.get('schedule_times', [])
+    schedule_times = config_values.get("schedule_times", [])
     if schedule_times:
         print(f"\nScheduled times: {', '.join(schedule_times)}")
     else:
         print("\nScheduled times: Not configured")
 
     # Backup directory sizes
-    backup_dirs = config_values.get('backup_dirs', [])
+    backup_dirs = config_values.get("backup_dirs", [])
     if backup_dirs:
         print("\nBackup directories:")
         for bdir in backup_dirs:
             bpath = Path(bdir)
             if bpath.exists():
-                total_size = sum(f.stat().st_size for f in bpath.rglob('*') if f.is_file())
+                total_size = sum(f.stat().st_size for f in bpath.rglob("*") if f.is_file())
                 # Human-readable size
                 if total_size >= 1073741824:
                     size_str = f"{total_size / 1073741824:.2f} GB"
@@ -220,7 +225,7 @@ def show_status(logger, config_path):
                 print(f"    Copied:    {manifest.get('files_copied', 0)} files")
                 print(f"    Skipped:   {manifest.get('files_skipped', 0)} files")
                 print(f"    Failed:    {manifest.get('files_failed', 0)} files")
-                total_bytes = manifest.get('total_bytes', 0)
+                total_bytes = manifest.get("total_bytes", 0)
                 if total_bytes >= 1048576:
                     print(f"    Size:      {total_bytes / 1048576:.2f} MB")
                 else:
@@ -232,8 +237,8 @@ def show_status(logger, config_path):
     print()
 
 
-
 # ─── Main Entry Point ───────────────────────────────────────────────────────
+
 
 def main():
     """CLI entry point — parses arguments, routes to the appropriate operation."""
@@ -260,21 +265,23 @@ def main():
             verify_config = extract_config_values(logger, config_path, skip_validation=True)
         except Exception:
             verify_config = {}
-        backup_dirs = args.backup_dirs or verify_config.get('backup_dirs', [])
+        backup_dirs = args.backup_dirs or verify_config.get("backup_dirs", [])
         if not backup_dirs:
-            logger.error("No backup directories to verify. Specify --backup-dirs or configure [BACKUPS] backup_dirs.")
+            logger.error(
+                "No backup directories to verify. Specify --backup-dirs or configure [BACKUPS] backup_dirs."
+            )
             sys.exit(1)
-        enc_passphrase = verify_config.get('encryption_passphrase')
-        enc_key_file = verify_config.get('encryption_key_file')
-        results = verify_backup_integrity(logger, backup_dirs,
-                                          encryption_passphrase=enc_passphrase,
-                                          encryption_key_file=enc_key_file)
+        enc_passphrase = verify_config.get("encryption_passphrase")
+        enc_key_file = verify_config.get("encryption_key_file")
+        results = verify_backup_integrity(
+            logger, backup_dirs, encryption_passphrase=enc_passphrase, encryption_key_file=enc_key_file
+        )
         all_ok = print_verify_report(results)
         sys.exit(0 if all_ok else 1)
 
     # Handle --snapshot early exit
     if args.snapshot:
-        output_path = args.snapshot_output or str(_PROJECT_ROOT / 'snapshots')
+        output_path = args.snapshot_output or str(_PROJECT_ROOT / "snapshots")
         snapshot_file = create_snapshot(logger, output_dir=output_path)
         print(f"\nSnapshot saved to: {snapshot_file}")
         return
@@ -284,7 +291,7 @@ def main():
         output = args.snapshot_output
         if output is None:
             snapshot_name = Path(args.restore_snapshot).stem
-            output = str(_PROJECT_ROOT / 'snapshots' / f'{snapshot_name}_restore.sh')
+            output = str(_PROJECT_ROOT / "snapshots" / f"{snapshot_name}_restore.sh")
         script_path = generate_restore_script(logger, args.restore_snapshot, output_path=output)
         if script_path:
             print(f"\nRestore script generated: {script_path}")
@@ -302,8 +309,8 @@ def main():
         else:
             print("\n=== Snapshot Diff ===\n")
             for category, changes in diff.items():
-                added = changes.get('added', [])
-                removed = changes.get('removed', [])
+                added = changes.get("added", [])
+                removed = changes.get("removed", [])
                 print(f"  {category}:")
                 for item in added:
                     print(f"    + {item}")
@@ -319,19 +326,23 @@ def main():
             restore_config = extract_config_values(logger, config_path, skip_validation=True)
         except Exception:
             restore_config = {}
-        enc_passphrase = restore_config.get('encryption_passphrase')
-        enc_key_file = restore_config.get('encryption_key_file')
+        enc_passphrase = restore_config.get("encryption_passphrase")
+        enc_key_file = restore_config.get("encryption_key_file")
 
         logger.info(f"Restoring from {args.from_dir} to {args.to_dir}")
-        success = restore_backup(logger, args.from_dir, args.to_dir,
-                                 timestamp=args.restore_timestamp,
-                                 encryption_passphrase=enc_passphrase,
-                                 encryption_key_file=enc_key_file,
-                                 ssh_password=restore_config.get('ssh_password'),
-                                 s3_region=restore_config.get('s3_region'),
-                                 s3_access_key=restore_config.get('s3_access_key'),
-                                 s3_secret_key=restore_config.get('s3_secret_key'),
-                                 dry_run=args.dry_run)
+        success = restore_backup(
+            logger,
+            args.from_dir,
+            args.to_dir,
+            timestamp=args.restore_timestamp,
+            encryption_passphrase=enc_passphrase,
+            encryption_key_file=enc_key_file,
+            ssh_password=restore_config.get("ssh_password"),
+            s3_region=restore_config.get("s3_region"),
+            s3_access_key=restore_config.get("s3_access_key"),
+            s3_secret_key=restore_config.get("s3_secret_key"),
+            dry_run=args.dry_run,
+        )
         if success:
             logger.info("Restore completed successfully.")
             print("Restore completed successfully.")
@@ -347,12 +358,22 @@ def main():
         try:
             telegram_bot = TelegramBot(logger)
         except FileNotFoundError:
-            logger.error("Telegram bot config not found. Create config/bot_config.ini from config/bot_config.ini.example")
-            print("Error: config/bot_config.ini not found. Copy config/bot_config.ini.example and fill in your values.", file=sys.stderr)
+            logger.error(
+                "Telegram bot config not found. Create config/bot_config.ini from config/bot_config.ini.example"
+            )
+            print(
+                "Error: config/bot_config.ini not found. Copy config/bot_config.ini.example and fill in your values.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         except KeyError as e:
-            logger.error(f"Missing key in bot_config.ini: {e}. Check that [TELEGRAM] api_token and [USERS] interacted_users are set.")
-            print(f"Error: Missing key in config/bot_config.ini: {e}. Ensure api_token and interacted_users are set.", file=sys.stderr)
+            logger.error(
+                f"Missing key in bot_config.ini: {e}. Check that [TELEGRAM] api_token and [USERS] interacted_users are set."
+            )
+            print(
+                f"Error: Missing key in config/bot_config.ini: {e}. Ensure api_token and interacted_users are set.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     # Use the provided receiver emails if notifications are enabled
@@ -361,43 +382,50 @@ def main():
     # Parse exclude patterns from CLI (overrides config)
     exclude_patterns = None
     if args.exclude:
-        exclude_patterns = [p.strip() for p in args.exclude.split(',') if p.strip()]
+        exclude_patterns = [p.strip() for p in args.exclude.split(",") if p.strip()]
 
     if args.scheduled:
         try:
-            scheduled_operation(logger, config_path, telegram_bot=telegram_bot,
-                                exclude_patterns=exclude_patterns, retain=args.retain)
+            scheduled_operation(
+                logger,
+                config_path,
+                telegram_bot=telegram_bot,
+                exclude_patterns=exclude_patterns,
+                retain=args.retain,
+            )
         except Exception as e:
             logger.error(f"Failed to load configuration file: {config_path}. Error: {e}")
             sys.exit(1)
     else:
-        rc = backup_operation(logger,
-                         source_dir=args.source_dir,
-                         backup_dirs=args.backup_dirs,
-                         ssh_servers=args.ssh_servers,
-                         operation_modes=args.operation_modes,
-                         backup_mode=args.backup_mode,
-                         compress=args.compress,
-                         receiver=receiver_emails,
-                         show_setup=args.show_setup,
-                         notifications=args.notifications,
-                         telegram_bot=telegram_bot,
-                         dry_run=args.dry_run,
-                         exclude_patterns=exclude_patterns,
-                         retain=args.retain,
-                         config_path=config_path,
-                         encrypt=args.encrypt,
-                         dedup=args.dedup,
-                         tailscale=args.tailscale,
-                         tailscale_authkey=args.tailscale_authkey)
+        rc = backup_operation(
+            logger,
+            source_dir=args.source_dir,
+            backup_dirs=args.backup_dirs,
+            ssh_servers=args.ssh_servers,
+            operation_modes=args.operation_modes,
+            backup_mode=args.backup_mode,
+            compress=args.compress,
+            receiver=receiver_emails,
+            show_setup=args.show_setup,
+            notifications=args.notifications,
+            telegram_bot=telegram_bot,
+            dry_run=args.dry_run,
+            exclude_patterns=exclude_patterns,
+            retain=args.retain,
+            config_path=config_path,
+            encrypt=args.encrypt,
+            dedup=args.dedup,
+            tailscale=args.tailscale,
+            tailscale_authkey=args.tailscale_authkey,
+        )
         if rc:
             sys.exit(rc)
 
 
 # ─── Scheduled Mode ─────────────────────────────────────────────────────────
 
-def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns=None,
-                        retain=None):
+
+def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns=None, retain=None):
     """
     Run backups on a configurable schedule with graceful shutdown support.
 
@@ -432,8 +460,8 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
         config_values = extract_config_values(logger, config_file, require_schedule=True)
 
         # Access the schedule times and interval
-        times = config_values.get('schedule_times', [])
-        interval_minutes = config_values.get('interval_minutes', 60)
+        times = config_values.get("schedule_times", [])
+        config_values.get("interval_minutes", 60)
         # Ensure all times are in the correct format
         scheduled_times = []
         for t in times:
@@ -445,7 +473,7 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
 
         # Use CLI exclude patterns if provided, otherwise use config
         if exclude_patterns is None:
-            exclude_patterns = config_values.get('exclude_patterns', [])
+            exclude_patterns = config_values.get("exclude_patterns", [])
 
         logger.info(f"Scheduled times: {scheduled_times}")
         while not _shutdown_requested:
@@ -457,9 +485,7 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
             matched = False
             for scheduled_time in scheduled_times:
                 scheduled_dt = now.replace(
-                    hour=scheduled_time.hour,
-                    minute=scheduled_time.minute,
-                    second=0, microsecond=0
+                    hour=scheduled_time.hour, minute=scheduled_time.minute, second=0, microsecond=0
                 )
                 diff = abs((now - scheduled_dt).total_seconds())
                 if diff <= 30:
@@ -468,12 +494,14 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
             if matched:
                 logger.info("Scheduled time matched. Performing backup operation...")
                 # Pre-flight: verify backup directories are accessible
-                sched_backup_dirs = config_values.get('backup_dirs', [])
+                sched_backup_dirs = config_values.get("backup_dirs", [])
                 if sched_backup_dirs:
                     inaccessible = _check_backup_dirs_accessible(logger, sched_backup_dirs)
                     if inaccessible:
-                        msg = (f"Scheduled backup aborted: destination(s) inaccessible: "
-                               f"{', '.join(inaccessible)}. Check that the disk is mounted.")
+                        msg = (
+                            f"Scheduled backup aborted: destination(s) inaccessible: "
+                            f"{', '.join(inaccessible)}. Check that the disk is mounted."
+                        )
                         logger.error(msg)
                         if telegram_bot:
                             try:
@@ -484,30 +512,32 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
                         continue
                 # Build operation_modes from config flags
                 operation_modes = []
-                if config_values.get('local_mode'):
-                    operation_modes.append('local')
-                if config_values.get('ssh_mode'):
-                    operation_modes.append('ssh')
-                if config_values.get('s3_mode'):
-                    operation_modes.append('s3')
-                if config_values.get('db_mode'):
-                    operation_modes.append('db')
-                rc = backup_operation(logger,
-                                 source_dir=config_values['source_dir'],
-                                 backup_dirs=config_values['backup_dirs'],
-                                 ssh_servers=config_values.get('ssh_servers'),
-                                 operation_modes=operation_modes,
-                                 backup_mode=config_values['mode'],
-                                 compress=config_values['compress_type'],
-                                 receiver=config_values['receiver_emails'],
-                                 notifications=bool(telegram_bot),
-                                 telegram_bot=telegram_bot,
-                                 ssh_username=config_values.get('ssh_username'),
-                                 ssh_password=config_values.get('ssh_password'),
-                                 exclude_patterns=exclude_patterns,
-                                 retain=retain,
-                                 config_path=None,
-                                 config_values=config_values)
+                if config_values.get("local_mode"):
+                    operation_modes.append("local")
+                if config_values.get("ssh_mode"):
+                    operation_modes.append("ssh")
+                if config_values.get("s3_mode"):
+                    operation_modes.append("s3")
+                if config_values.get("db_mode"):
+                    operation_modes.append("db")
+                rc = backup_operation(
+                    logger,
+                    source_dir=config_values["source_dir"],
+                    backup_dirs=config_values["backup_dirs"],
+                    ssh_servers=config_values.get("ssh_servers"),
+                    operation_modes=operation_modes,
+                    backup_mode=config_values["mode"],
+                    compress=config_values["compress_type"],
+                    receiver=config_values["receiver_emails"],
+                    notifications=bool(telegram_bot),
+                    telegram_bot=telegram_bot,
+                    ssh_username=config_values.get("ssh_username"),
+                    ssh_password=config_values.get("ssh_password"),
+                    exclude_patterns=exclude_patterns,
+                    retain=retain,
+                    config_path=None,
+                    config_values=config_values,
+                )
                 if rc:
                     logger.error(f"Scheduled run returned exit code {rc}; scheduler continues.")
             else:
@@ -523,6 +553,7 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
 
 
 # ─── Notification Helpers ───────────────────────────────────────────────────
+
 
 def _notify(logger, telegram_bot, notifications, message, config_values=None):
     """
@@ -540,34 +571,34 @@ def _notify(logger, telegram_bot, notifications, message, config_values=None):
 
     # Webhook notification
     if config_values:
-        webhook_url = config_values.get('webhook_url')
+        webhook_url = config_values.get("webhook_url")
         if webhook_url:
             try:
                 headers = {}
-                auth_header = config_values.get('webhook_auth_header')
+                auth_header = config_values.get("webhook_auth_header")
                 if auth_header:
-                    headers['Authorization'] = auth_header
+                    headers["Authorization"] = auth_header
                 send_webhook(logger, webhook_url, message, headers=headers or None)
             except Exception as e:
                 logger.error(f"Failed to send webhook notification: {e}")
 
     # SMTP email notification
     if config_values:
-        smtp_host = config_values.get('smtp_host')
-        smtp_to = config_values.get('smtp_to', [])
+        smtp_host = config_values.get("smtp_host")
+        smtp_to = config_values.get("smtp_to", [])
         if smtp_host and smtp_to:
             try:
                 send_smtp_email(
                     logger,
                     smtp_host=smtp_host,
-                    smtp_port=config_values.get('smtp_port', 587),
-                    smtp_user=config_values.get('smtp_user'),
-                    smtp_password=config_values.get('smtp_password'),
-                    from_addr=config_values.get('smtp_from', config_values.get('smtp_user', '')),
+                    smtp_port=config_values.get("smtp_port", 587),
+                    smtp_user=config_values.get("smtp_user"),
+                    smtp_password=config_values.get("smtp_password"),
+                    from_addr=config_values.get("smtp_from", config_values.get("smtp_user", "")),
                     to_addrs=smtp_to,
                     subject=f"Backup Handler: {message[:50]}",
                     body=message,
-                    use_tls=config_values.get('smtp_tls', True),
+                    use_tls=config_values.get("smtp_tls", True),
                 )
             except Exception as e:
                 logger.error(f"Failed to send SMTP notification: {e}")
@@ -584,16 +615,28 @@ def _run_backup(logger, telegram_bot, notifications, mode_name, backup_fn, confi
     """
     try:
         backup_fn()
-        _notify(logger, telegram_bot, notifications, f"Local {mode_name} backup completed.", config_values=config_values)
+        _notify(
+            logger,
+            telegram_bot,
+            notifications,
+            f"Local {mode_name} backup completed.",
+            config_values=config_values,
+        )
         return True
     except Exception as e:
         logger.error(f"{mode_name.capitalize()} backup failed: {e}")
-        _notify(logger, telegram_bot, notifications, f"{mode_name.capitalize()} backup failed.", config_values=config_values)
+        _notify(
+            logger,
+            telegram_bot,
+            notifications,
+            f"{mode_name.capitalize()} backup failed.",
+            config_values=config_values,
+        )
         return False
 
 
-
 # ─── Pre-flight Checks ─────────────────────────────────────────────────────
+
 
 def _check_backup_dirs_accessible(logger, backup_dirs):
     """
@@ -604,15 +647,16 @@ def _check_backup_dirs_accessible(logger, backup_dirs):
     created. Returns a list of inaccessible directories (empty = all OK).
     """
     inaccessible = []
-    for bdir in (backup_dirs or []):
+    for bdir in backup_dirs or []:
         bpath = Path(bdir)
         # Check if the path is under a mount point (e.g. /mnt/data/...)
         parts = bpath.parts
-        if len(parts) >= 3 and parts[1] == 'mnt':
-            mount_point = Path('/') / parts[1] / parts[2]  # e.g. /mnt/data
+        if len(parts) >= 3 and parts[1] == "mnt":
+            mount_point = Path("/") / parts[1] / parts[2]  # e.g. /mnt/data
             if not os.path.ismount(str(mount_point)):
-                logger.error(f"Mount point {mount_point} is not mounted. "
-                             f"Backup directory {bdir} is inaccessible.")
+                logger.error(
+                    f"Mount point {mount_point} is not mounted. Backup directory {bdir} is inaccessible."
+                )
                 inaccessible.append(bdir)
                 continue
         # Check if the directory exists or its parent is writable
@@ -628,13 +672,31 @@ def _check_backup_dirs_accessible(logger, backup_dirs):
 
 # ─── Core Backup Pipeline ───────────────────────────────────────────────────
 
-def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None,
-                     operation_modes=None, backup_mode=None, compress=None,
-                     receiver=None, show_setup=False, notifications=False,
-                     telegram_bot=None, ssh_username=None, ssh_password=None,
-                     dry_run=False, exclude_patterns=None, retain=None,
-                     config_path=None, config_values=None, encrypt=False, dedup=False,
-                     tailscale=False, tailscale_authkey=None):
+
+def backup_operation(
+    logger,
+    source_dir=None,
+    backup_dirs=None,
+    ssh_servers=None,
+    operation_modes=None,
+    backup_mode=None,
+    compress=None,
+    receiver=None,
+    show_setup=False,
+    notifications=False,
+    telegram_bot=None,
+    ssh_username=None,
+    ssh_password=None,
+    dry_run=False,
+    exclude_patterns=None,
+    retain=None,
+    config_path=None,
+    config_values=None,
+    encrypt=False,
+    dedup=False,
+    tailscale=False,
+    tailscale_authkey=None,
+):
     """
     Orchestrate the full backup pipeline for a single run.
 
@@ -675,62 +737,70 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
 
     # Use config exclude patterns if CLI didn't provide them
     if exclude_patterns is None:
-        exclude_patterns = config_values.get('exclude_patterns', [])
+        exclude_patterns = config_values.get("exclude_patterns", [])
 
     # Pre-flight: verify backup directories are accessible
     if backup_dirs and not dry_run and not show_setup:
         inaccessible = _check_backup_dirs_accessible(logger, backup_dirs)
         if inaccessible:
-            msg = (f"Backup aborted: destination(s) inaccessible: {', '.join(inaccessible)}. "
-                   f"Check that the disk is mounted.")
+            msg = (
+                f"Backup aborted: destination(s) inaccessible: {', '.join(inaccessible)}. "
+                f"Check that the disk is mounted."
+            )
             logger.error(msg)
             _notify(logger, telegram_bot, notifications, msg, config_values=config_values)
             return 2
 
     # Hooks
-    pre_hook = config_values.get('pre_backup_hook')
-    post_hook = config_values.get('post_backup_hook')
+    pre_hook = config_values.get("pre_backup_hook")
+    post_hook = config_values.get("post_backup_hook")
 
     # Retention (CLI --retain overrides config max_count)
-    max_age_days = config_values.get('max_age_days', 0)
-    max_count = retain if retain is not None else config_values.get('max_count', 0)
+    max_age_days = config_values.get("max_age_days", 0)
+    max_count = retain if retain is not None else config_values.get("max_count", 0)
 
     # Parallel copies
-    parallel_copies = config_values.get('parallel_copies', 1)
+    parallel_copies = config_values.get("parallel_copies", 1)
 
     # Bandwidth limit
-    bandwidth_limit = config_values.get('bandwidth_limit', 0)
+    bandwidth_limit = config_values.get("bandwidth_limit", 0)
 
     # S3 config
-    s3_bucket = config_values.get('s3_bucket')
-    s3_prefix = config_values.get('s3_prefix', '')
-    s3_region = config_values.get('s3_region')
-    s3_access_key = config_values.get('s3_access_key')
-    s3_secret_key = config_values.get('s3_secret_key')
+    s3_bucket = config_values.get("s3_bucket")
+    s3_prefix = config_values.get("s3_prefix", "")
+    s3_region = config_values.get("s3_region")
+    s3_access_key = config_values.get("s3_access_key")
+    s3_secret_key = config_values.get("s3_secret_key")
 
     # Run pre-backup hook
-    if pre_hook:
-        if not run_hook(logger, pre_hook, 'pre_backup'):
-            logger.error("Pre-backup hook failed. Aborting backup.")
-            _notify(logger, telegram_bot, notifications, "Backup aborted: pre-backup hook failed.",
-                    config_values=config_values)
-            return 2
+    if pre_hook and not run_hook(logger, pre_hook, "pre_backup"):
+        logger.error("Pre-backup hook failed. Aborting backup.")
+        _notify(
+            logger,
+            telegram_bot,
+            notifications,
+            "Backup aborted: pre-backup hook failed.",
+            config_values=config_values,
+        )
+        return 2
 
     # Track per-mode failures so we can exit non-zero if any mode failed.
     # Systemd and Prometheus rely on this to page an operator.
     mode_failures: list[str] = []
 
     # Create manifest for this backup run
-    manifest = BackupManifest(mode=backup_mode or 'full')
+    manifest = BackupManifest(mode=backup_mode or "full")
 
     # Execute selected backup modes
     if operation_modes is None:
         operation_modes = []
-    if 'local' in operation_modes:
+    if "local" in operation_modes:
         if not backup_dirs:
             logger.warning("Local mode selected but no backup directories specified. Skipping local backup.")
         elif dry_run:
-            logger.info(f"[DRY RUN] Would perform {backup_mode or 'full'} backup: '{source_dir}' -> {backup_dirs}")
+            logger.info(
+                f"[DRY RUN] Would perform {backup_mode or 'full'} backup: '{source_dir}' -> {backup_dirs}"
+            )
             print(f"[DRY RUN] Would perform {backup_mode or 'full'} backup")
             print(f"  Source:      {source_dir}")
             print(f"  Destinations: {', '.join(backup_dirs)}")
@@ -738,167 +808,258 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 print(f"  Compression: {compress}")
             if exclude_patterns:
                 print(f"  Excluding:   {', '.join(exclude_patterns)}")
-        elif backup_mode == 'incremental':
+        elif backup_mode == "incremental":
             if compress:
                 logger.error("Invalid option for incremental backup.")
                 sys.exit(1)
             last_backup_time = get_last_backup_time()
-            if not _run_backup(logger, telegram_bot, notifications, "incremental",
-                        lambda: perform_incremental_backup(logger, source_dir, backup_dirs,
-                                                           last_backup_time, bot=telegram_bot,
-                                                           receiver_emails=receiver,
-                                                           exclude_patterns=exclude_patterns,
-                                                           manifest=manifest),
-                        config_values=config_values):
+            if not _run_backup(
+                logger,
+                telegram_bot,
+                notifications,
+                "incremental",
+                lambda: perform_incremental_backup(
+                    logger,
+                    source_dir,
+                    backup_dirs,
+                    last_backup_time,
+                    bot=telegram_bot,
+                    receiver_emails=receiver,
+                    exclude_patterns=exclude_patterns,
+                    manifest=manifest,
+                ),
+                config_values=config_values,
+            ):
                 mode_failures.append("local-incremental")
-        elif backup_mode == 'differential':
+        elif backup_mode == "differential":
             if compress:
                 logger.error("Invalid option for differential backup.")
                 sys.exit(1)
             last_full_backup_time = get_last_full_backup_time()
-            if not _run_backup(logger, telegram_bot, notifications, "differential",
-                        lambda: perform_differential_backup(logger, source_dir, backup_dirs,
-                                                            last_full_backup_time, bot=telegram_bot,
-                                                            receiver_emails=receiver,
-                                                            exclude_patterns=exclude_patterns,
-                                                            manifest=manifest),
-                        config_values=config_values):
+            if not _run_backup(
+                logger,
+                telegram_bot,
+                notifications,
+                "differential",
+                lambda: perform_differential_backup(
+                    logger,
+                    source_dir,
+                    backup_dirs,
+                    last_full_backup_time,
+                    bot=telegram_bot,
+                    receiver_emails=receiver,
+                    exclude_patterns=exclude_patterns,
+                    manifest=manifest,
+                ),
+                config_values=config_values,
+            ):
                 mode_failures.append("local-differential")
         else:
-            _notify(logger, telegram_bot, notifications, "Starting full backup...",
-                    config_values=config_values)
-            if _run_backup(logger, telegram_bot, notifications, "full",
-                        lambda: perform_full_backup(logger, source_dir, backup_dirs,
-                                                     compress=compress, bot=telegram_bot,
-                                                     receiver_emails=receiver,
-                                                     exclude_patterns=exclude_patterns,
-                                                     manifest=manifest,
-                                                     parallel_copies=parallel_copies),
-                        config_values=config_values):
+            _notify(
+                logger, telegram_bot, notifications, "Starting full backup...", config_values=config_values
+            )
+            if _run_backup(
+                logger,
+                telegram_bot,
+                notifications,
+                "full",
+                lambda: perform_full_backup(
+                    logger,
+                    source_dir,
+                    backup_dirs,
+                    compress=compress,
+                    bot=telegram_bot,
+                    receiver_emails=receiver,
+                    exclude_patterns=exclude_patterns,
+                    manifest=manifest,
+                    parallel_copies=parallel_copies,
+                ),
+                config_values=config_values,
+            ):
                 update_last_full_backup_time()
             else:
                 mode_failures.append("local-full")
 
     # Resolve Tailscale settings (CLI flags override config)
-    ts_enabled = tailscale or config_values.get('tailscale_enabled', False)
-    ts_auth_key = tailscale_authkey or config_values.get('tailscale_auth_key')
-    ts_hostname = config_values.get('tailscale_hostname')
-    ts_tags = config_values.get('tailscale_advertise_tags')
-    ts_accept_routes = config_values.get('tailscale_accept_routes', False)
-    ts_disconnect_after = config_values.get('tailscale_disconnect_after', False)
+    ts_enabled = tailscale or config_values.get("tailscale_enabled", False)
+    ts_auth_key = tailscale_authkey or config_values.get("tailscale_auth_key")
+    ts_hostname = config_values.get("tailscale_hostname")
+    ts_tags = config_values.get("tailscale_advertise_tags")
+    ts_accept_routes = config_values.get("tailscale_accept_routes", False)
+    ts_disconnect_after = config_values.get("tailscale_disconnect_after", False)
     _ts_brought_up = False
 
-    if operation_modes and ('ssh' in operation_modes):
+    if operation_modes and ("ssh" in operation_modes):
         if not ssh_servers:
             logger.warning("SSH mode selected but no SSH servers specified. Skipping SSH backup.")
         elif dry_run:
             logger.info(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {ssh_servers}")
             print(f"[DRY RUN] Would sync '{source_dir}' to SSH servers: {', '.join(ssh_servers)}")
             if ts_enabled:
-                print(f"[DRY RUN] Would connect via Tailscale VPN (auth_key: {'set' if ts_auth_key else 'not set'})")
+                print(
+                    f"[DRY RUN] Would connect via Tailscale VPN (auth_key: {'set' if ts_auth_key else 'not set'})"
+                )
         else:
             # Bring up Tailscale before SSH if enabled
             if ts_enabled:
                 if not ts_auth_key:
-                    logger.error("Tailscale enabled but no auth key provided. "
-                                 "Set --tailscale-authkey or [TAILSCALE] auth_key in config.")
-                    _notify(logger, telegram_bot, notifications,
-                            "SSH backup aborted: Tailscale auth key missing.",
-                            config_values=config_values)
+                    logger.error(
+                        "Tailscale enabled but no auth key provided. "
+                        "Set --tailscale-authkey or [TAILSCALE] auth_key in config."
+                    )
+                    _notify(
+                        logger,
+                        telegram_bot,
+                        notifications,
+                        "SSH backup aborted: Tailscale auth key missing.",
+                        config_values=config_values,
+                    )
                     mode_failures.append("ssh")
                 else:
                     _ts_brought_up = tailscale_up(
-                        ts_auth_key, logger=logger, hostname=ts_hostname,
-                        advertise_tags=ts_tags, accept_routes=ts_accept_routes)
+                        ts_auth_key,
+                        logger=logger,
+                        hostname=ts_hostname,
+                        advertise_tags=ts_tags,
+                        accept_routes=ts_accept_routes,
+                    )
                     if not _ts_brought_up:
                         logger.error("Failed to establish Tailscale connection. Aborting SSH backup.")
-                        _notify(logger, telegram_bot, notifications,
-                                "SSH backup aborted: Tailscale connection failed.",
-                                config_values=config_values)
+                        _notify(
+                            logger,
+                            telegram_bot,
+                            notifications,
+                            "SSH backup aborted: Tailscale connection failed.",
+                            config_values=config_values,
+                        )
                         mode_failures.append("ssh")
 
             # Only proceed with SSH if Tailscale is not required or connected successfully
             if not ts_enabled or _ts_brought_up:
-                _notify(logger, telegram_bot, notifications,
-                        f"Starting SSH backup{' via Tailscale' if ts_enabled else ''}...",
-                        config_values=config_values)
+                _notify(
+                    logger,
+                    telegram_bot,
+                    notifications,
+                    f"Starting SSH backup{' via Tailscale' if ts_enabled else ''}...",
+                    config_values=config_values,
+                )
                 logger.info("Running SSH backup...")
                 try:
-                    sync_ssh_servers_concurrently(source_dir, ssh_servers, username=ssh_username or '',
-                                                  password=ssh_password, logger=logger,
-                                                  exclude_patterns=exclude_patterns,
-                                                  manifest=manifest,
-                                                  bandwidth_limit=bandwidth_limit)
-                    _notify(logger, telegram_bot, notifications, "SSH backup completed.",
-                            config_values=config_values)
+                    sync_ssh_servers_concurrently(
+                        source_dir,
+                        ssh_servers,
+                        username=ssh_username or "",
+                        password=ssh_password,
+                        logger=logger,
+                        exclude_patterns=exclude_patterns,
+                        manifest=manifest,
+                        bandwidth_limit=bandwidth_limit,
+                    )
+                    _notify(
+                        logger,
+                        telegram_bot,
+                        notifications,
+                        "SSH backup completed.",
+                        config_values=config_values,
+                    )
                 except Exception as e:
                     logger.error(f"SSH backup failed: {e}")
-                    _notify(logger, telegram_bot, notifications, "SSH backup failed.",
-                            config_values=config_values)
+                    _notify(
+                        logger, telegram_bot, notifications, "SSH backup failed.", config_values=config_values
+                    )
                     mode_failures.append("ssh")
                 finally:
                     # Disconnect Tailscale after SSH backup if configured
                     if ts_enabled and _ts_brought_up and ts_disconnect_after:
                         tailscale_down(logger=logger)
 
-    if operation_modes and ('s3' in operation_modes):
+    if operation_modes and ("s3" in operation_modes):
         if not s3_bucket:
             logger.warning("S3 mode selected but no bucket configured. Skipping S3 backup.")
         elif dry_run:
             logger.info(f"[DRY RUN] Would sync '{source_dir}' to s3://{s3_bucket}/{s3_prefix}")
             print(f"[DRY RUN] Would sync '{source_dir}' to s3://{s3_bucket}/{s3_prefix}")
         else:
-            _notify(logger, telegram_bot, notifications, "Starting S3 backup...",
-                    config_values=config_values)
+            _notify(logger, telegram_bot, notifications, "Starting S3 backup...", config_values=config_values)
             logger.info("Running S3 backup...")
             try:
-                sync_to_s3(logger, source_dir, s3_bucket, prefix=s3_prefix,
-                           region=s3_region, access_key=s3_access_key,
-                           secret_key=s3_secret_key, mode=backup_mode or 'full',
-                           exclude_patterns=exclude_patterns, manifest=manifest,
-                           max_bandwidth=config_values.get('s3_max_bandwidth'),
-                           multipart_threshold=config_values.get('s3_multipart_threshold'),
-                           max_concurrency=config_values.get('s3_max_concurrency'))
-                _notify(logger, telegram_bot, notifications, "S3 backup completed.",
-                        config_values=config_values)
+                sync_to_s3(
+                    logger,
+                    source_dir,
+                    s3_bucket,
+                    prefix=s3_prefix,
+                    region=s3_region,
+                    access_key=s3_access_key,
+                    secret_key=s3_secret_key,
+                    mode=backup_mode or "full",
+                    exclude_patterns=exclude_patterns,
+                    manifest=manifest,
+                    max_bandwidth=config_values.get("s3_max_bandwidth"),
+                    multipart_threshold=config_values.get("s3_multipart_threshold"),
+                    max_concurrency=config_values.get("s3_max_concurrency"),
+                )
+                _notify(
+                    logger, telegram_bot, notifications, "S3 backup completed.", config_values=config_values
+                )
             except Exception as e:
                 logger.error(f"S3 backup failed: {e}")
-                _notify(logger, telegram_bot, notifications, "S3 backup failed.",
-                        config_values=config_values)
+                _notify(logger, telegram_bot, notifications, "S3 backup failed.", config_values=config_values)
                 mode_failures.append("s3")
 
-    if operation_modes and ('db' in operation_modes):
-        db_database = config_values.get('db_database')
+    if operation_modes and ("db" in operation_modes):
+        db_database = config_values.get("db_database")
         if not db_database:
-            logger.warning("DB mode selected but no database configured in [DATABASE]. Skipping database backup.")
+            logger.warning(
+                "DB mode selected but no database configured in [DATABASE]. Skipping database backup."
+            )
         elif dry_run:
             perform_db_backup(logger, config_values, backup_dirs or [], manifest, dry_run=True)
         else:
-            _notify(logger, telegram_bot, notifications, "Starting database backup...",
-                    config_values=config_values)
+            _notify(
+                logger,
+                telegram_bot,
+                notifications,
+                "Starting database backup...",
+                config_values=config_values,
+            )
             logger.info("Running database backup...")
             try:
                 success = perform_db_backup(logger, config_values, backup_dirs or [], manifest)
                 if success:
-                    _notify(logger, telegram_bot, notifications, "Database backup completed.",
-                            config_values=config_values)
+                    _notify(
+                        logger,
+                        telegram_bot,
+                        notifications,
+                        "Database backup completed.",
+                        config_values=config_values,
+                    )
                 else:
-                    _notify(logger, telegram_bot, notifications, "Database backup failed.",
-                            config_values=config_values)
+                    _notify(
+                        logger,
+                        telegram_bot,
+                        notifications,
+                        "Database backup failed.",
+                        config_values=config_values,
+                    )
                     mode_failures.append("db")
             except Exception as e:
                 logger.error(f"Database backup failed: {e}")
-                _notify(logger, telegram_bot, notifications, "Database backup failed.",
-                        config_values=config_values)
+                _notify(
+                    logger,
+                    telegram_bot,
+                    notifications,
+                    "Database backup failed.",
+                    config_values=config_values,
+                )
                 mode_failures.append("db")
 
     if dry_run:
         # Show encryption info in dry-run
-        dry_encrypt = encrypt or config_values.get('encryption_enabled', False)
+        dry_encrypt = encrypt or config_values.get("encryption_enabled", False)
         if dry_encrypt:
-            enc_method = 'key_file' if config_values.get('encryption_key_file') else 'passphrase'
+            enc_method = "key_file" if config_values.get("encryption_key_file") else "passphrase"
             print(f"[DRY RUN] Would encrypt backup files using AES-256-GCM ({enc_method})")
-        dry_dedup = dedup or config_values.get('dedup_enabled', False)
+        dry_dedup = dedup or config_values.get("dedup_enabled", False)
         if dry_dedup:
             print("[DRY RUN] Would deduplicate identical files using hardlinks")
         logger.info("[DRY RUN] Complete. No files were modified.")
@@ -915,19 +1076,21 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
                 logger.error(f"Failed to save manifest to {bdir}: {e}")
 
     # Warn about compression + encryption interaction
-    if compress and compress != 'none':
-        enc_check = encrypt or config_values.get('encryption_enabled', False)
+    if compress and compress != "none":
+        enc_check = encrypt or config_values.get("encryption_enabled", False)
         if enc_check:
-            logger.warning("Both compression and encryption are enabled. "
-                           "Encrypted data does not compress well — compression runs first, "
-                           "then encryption is applied to the compressed archive.")
+            logger.warning(
+                "Both compression and encryption are enabled. "
+                "Encrypted data does not compress well — compression runs first, "
+                "then encryption is applied to the compressed archive."
+            )
 
     # Encrypt backup files (after manifest save, before retention)
-    encryption_enabled = encrypt or config_values.get('encryption_enabled', False)
-    enc_passphrase = config_values.get('encryption_passphrase')
-    enc_key_file = config_values.get('encryption_key_file')
+    encryption_enabled = encrypt or config_values.get("encryption_enabled", False)
+    enc_passphrase = config_values.get("encryption_passphrase")
+    enc_key_file = config_values.get("encryption_key_file")
 
-    enc_workers = config_values.get('encryption_workers', 1)
+    enc_workers = config_values.get("encryption_workers", 1)
 
     if encryption_enabled and backup_dirs:
         if not enc_passphrase and not enc_key_file:
@@ -935,21 +1098,27 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
         else:
             for bdir in backup_dirs:
                 try:
-                    count = encrypt_directory(bdir, passphrase=enc_passphrase,
-                                              key_file=enc_key_file, logger=logger,
-                                              workers=enc_workers)
+                    count = encrypt_directory(
+                        bdir,
+                        passphrase=enc_passphrase,
+                        key_file=enc_key_file,
+                        logger=logger,
+                        workers=enc_workers,
+                    )
                     logger.info(f"Encrypted {count} files in {bdir}")
                 except Exception as e:
                     logger.error(f"Encryption failed for {bdir}: {e}")
 
     # Deduplicate backup files (after encryption, before retention)
-    dedup_enabled = dedup or config_values.get('dedup_enabled', False)
+    dedup_enabled = dedup or config_values.get("dedup_enabled", False)
     if dedup_enabled and backup_dirs:
         try:
             dedup_result = deduplicate_backup_dirs(logger, backup_dirs)
-            if dedup_result['duplicates_found'] > 0:
-                logger.info(f"Dedup: {dedup_result['duplicates_found']} duplicates, "
-                            f"{dedup_result['bytes_saved']} bytes saved")
+            if dedup_result["duplicates_found"] > 0:
+                logger.info(
+                    f"Dedup: {dedup_result['duplicates_found']} duplicates, "
+                    f"{dedup_result['bytes_saved']} bytes saved"
+                )
         except Exception as e:
             logger.error(f"Deduplication failed: {e}")
 
@@ -964,32 +1133,40 @@ def backup_operation(logger, source_dir=None, backup_dirs=None, ssh_servers=None
         cleanup_old_backups(logger, backup_dirs, max_age_days=max_age_days, max_count=max_count)
 
     # Run post-backup hook
-    if post_hook:
-        if not run_hook(logger, post_hook, 'post_backup'):
-            logger.warning("Post-backup hook failed (backup itself succeeded).")
+    if post_hook and not run_hook(logger, post_hook, "post_backup"):
+        logger.warning("Post-backup hook failed (backup itself succeeded).")
 
     if mode_failures:
         failed_str = ", ".join(mode_failures)
         logger.error(f"Backup run finished with failures in: {failed_str}")
-        _notify(logger, telegram_bot, notifications,
-                f"Backup run finished with failures in: {failed_str}",
-                config_values=config_values)
+        _notify(
+            logger,
+            telegram_bot,
+            notifications,
+            f"Backup run finished with failures in: {failed_str}",
+            config_values=config_values,
+        )
         return 3
 
-    _notify(logger, telegram_bot, notifications, "All backup operations completed successfully.",
-            config_values=config_values)
+    _notify(
+        logger,
+        telegram_bot,
+        notifications,
+        "All backup operations completed successfully.",
+        config_values=config_values,
+    )
 
     # Dead-man's-switch ping. Only on full success — a failed run must not
     # reset the heartbeat window, or the external watchdog will never page.
-    hb_url = config_values.get('heartbeat_url')
+    hb_url = config_values.get("heartbeat_url")
     if hb_url:
         try:
-            send_heartbeat(logger, hb_url,
-                           timeout=config_values.get('heartbeat_timeout', 10))
+            send_heartbeat(logger, hb_url, timeout=config_values.get("heartbeat_timeout", 10))
         except Exception as e:
             logger.error(f"Heartbeat dispatch failed (non-fatal): {e}")
 
     return 0
+
 
 if __name__ == "__main__":
     main()

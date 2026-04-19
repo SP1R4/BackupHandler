@@ -11,9 +11,8 @@ then count-based cleanup applies to the remaining entries. Manifest JSON
 files are excluded from cleanup to preserve backup history metadata.
 """
 
-import os
-import time
 import shutil
+import time
 from pathlib import Path
 
 
@@ -39,7 +38,7 @@ def cleanup_old_backups(logger, backup_dirs, max_age_days=0, max_count=0):
         entries = []
         for entry in backup_path.iterdir():
             # Skip manifest files
-            if entry.name.startswith('backup_manifest_') and entry.suffix == '.json':
+            if entry.name.startswith("backup_manifest_") and entry.suffix == ".json":
                 continue
             entries.append(entry)
 

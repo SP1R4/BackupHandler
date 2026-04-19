@@ -1,9 +1,11 @@
 import io
 import os
 import shutil
+from datetime import datetime
+
 import keyring
 import pyminizip
-from datetime import datetime
+
 from email_nots.email import send_email
 
 
@@ -14,7 +16,10 @@ def save_file_passwd(logger, timestamp, passwd):
     except Exception as e:
         logger.error(f"Failed to store password securely: {e}")
 
-def compress_directory(logger, src_dirs=None, output_dirs=None, password=None, bot_handler=None, receiver_emails=None):
+
+def compress_directory(
+    logger, src_dirs=None, output_dirs=None, password=None, bot_handler=None, receiver_emails=None
+):
     """
     Compress multiple source directories into ZIP files with optional password protection.
     The output ZIP files will be saved in the corresponding output directories.
@@ -33,23 +38,27 @@ def compress_directory(logger, src_dirs=None, output_dirs=None, password=None, b
 
     for src_dir in src_dirs:
         files = []
-        for root, dirs, file_list in os.walk(src_dir):
+        for root, _dirs, file_list in os.walk(src_dir):
             for file in file_list:
                 files.append(os.path.join(root, file))
 
         for output_dir in output_dirs:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_zip = os.path.join(output_dir, f"backup_{timestamp}.zip")
 
             try:
                 if password:
                     pyminizip.compress_multiple(files, [], output_zip, password, 5)
-                    logger.info(f"Compressed directory '{src_dir}' to '{output_zip}' with password protection")
+                    logger.info(
+                        f"Compressed directory '{src_dir}' to '{output_zip}' with password protection"
+                    )
 
                     save_file_passwd(logger, timestamp, password)
                 else:
-                    shutil.make_archive(output_zip[:-4], 'zip', src_dir)
-                    logger.info(f"Compressed directory '{src_dir}' to '{output_zip}' without password protection")
+                    shutil.make_archive(output_zip[:-4], "zip", src_dir)
+                    logger.info(
+                        f"Compressed directory '{src_dir}' to '{output_zip}' without password protection"
+                    )
 
                 # Send password via bot if enabled (pass password directly)
                 if bot_handler and password:
@@ -76,7 +85,7 @@ def _send_password_via_bot(logger, bot_handler, timestamp, password):
     """
     try:
         content = f"{timestamp}: {password}\n"
-        buf = io.BytesIO(content.encode('utf-8'))
+        buf = io.BytesIO(content.encode("utf-8"))
         buf.name = "backup_password.txt"
 
         bot_handler.send_document(document=buf, caption="Here is your backup password.")
@@ -97,9 +106,10 @@ def _send_password_via_email(logger, receiver_emails, timestamp, password):
     """
     try:
         import tempfile
+
         content = f"{timestamp}: {password}\n"
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
 
