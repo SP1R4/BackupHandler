@@ -13,16 +13,15 @@ The verification process is non-destructive — original backup files and
 encrypted copies are never modified.
 """
 
-import os
 import tempfile
 from pathlib import Path
-from .utils import calculate_checksum
-from .manifest import load_latest_manifest
+
 from .encryption import decrypt_file
+from .manifest import load_latest_manifest
+from .utils import calculate_checksum
 
 
-def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
-                            encryption_key_file=None):
+def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, encryption_key_file=None):
     """
     Verify backup integrity by checking file existence and SHA-256 checksums
     against the latest manifest in each backup directory.
@@ -38,29 +37,29 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
             and per-directory details.
     """
     results = {
-        'total': 0,
-        'verified': 0,
-        'missing': 0,
-        'corrupted': 0,
-        'errors': 0,
-        'directories': {},
+        "total": 0,
+        "verified": 0,
+        "missing": 0,
+        "corrupted": 0,
+        "errors": 0,
+        "directories": {},
     }
 
     for bdir in backup_dirs:
         bpath = Path(bdir)
         dir_result = {
-            'manifest_found': False,
-            'verified': 0,
-            'missing': 0,
-            'corrupted': 0,
-            'errors': 0,
-            'details': [],
+            "manifest_found": False,
+            "verified": 0,
+            "missing": 0,
+            "corrupted": 0,
+            "errors": 0,
+            "details": [],
         }
 
         if not bpath.exists():
             logger.warning(f"Backup directory does not exist: {bdir}")
-            dir_result['details'].append(f"Directory not found: {bdir}")
-            results['directories'][bdir] = dir_result
+            dir_result["details"].append(f"Directory not found: {bdir}")
+            results["directories"][bdir] = dir_result
             continue
 
         manifest = load_latest_manifest(bdir)
@@ -68,19 +67,19 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
             logger.warning(f"No manifest found in {bdir}. Falling back to file-only check.")
             # Fallback: just verify all files are readable
             count = _verify_files_exist(logger, bpath, dir_result)
-            results['total'] += count
-            results['verified'] += dir_result['verified']
-            results['directories'][bdir] = dir_result
+            results["total"] += count
+            results["verified"] += dir_result["verified"]
+            results["directories"][bdir] = dir_result
             continue
 
-        dir_result['manifest_found'] = True
-        copied_entries = manifest.get('copied', [])
+        dir_result["manifest_found"] = True
+        copied_entries = manifest.get("copied", [])
         logger.info(f"Verifying {len(copied_entries)} files from manifest in {bdir}")
 
         for entry in copied_entries:
-            results['total'] += 1
-            file_path = entry.get('path', '')
-            expected_size = entry.get('size', 0)
+            results["total"] += 1
+            file_path = entry.get("path", "")
+            expected_size = entry.get("size", 0)
 
             # The manifest records original source paths; find the file in the backup dir
             # Try to resolve relative to backup dir
@@ -91,57 +90,68 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None,
                 enc_candidate = _find_encrypted_file(bpath, file_path)
                 if enc_candidate and (encryption_passphrase or encryption_key_file):
                     # Decrypt to temp file for verification
-                    ok = _verify_encrypted_file(logger, enc_candidate, expected_size,
-                                                encryption_passphrase, encryption_key_file,
-                                                dir_result)
+                    ok = _verify_encrypted_file(
+                        logger,
+                        enc_candidate,
+                        expected_size,
+                        encryption_passphrase,
+                        encryption_key_file,
+                        dir_result,
+                    )
                     if ok:
-                        results['verified'] += 1
+                        results["verified"] += 1
                     else:
-                        results['corrupted'] += 1
+                        results["corrupted"] += 1
                     continue
                 elif enc_candidate:
                     # Encrypted but no key — can only check existence and size of .enc file
-                    dir_result['verified'] += 1
-                    results['verified'] += 1
-                    dir_result['details'].append(f"OK (encrypted, not decrypted): {enc_candidate.name}")
+                    dir_result["verified"] += 1
+                    results["verified"] += 1
+                    dir_result["details"].append(f"OK (encrypted, not decrypted): {enc_candidate.name}")
                     continue
 
                 logger.warning(f"Missing file: {file_path}")
-                dir_result['missing'] += 1
-                results['missing'] += 1
-                dir_result['details'].append(f"MISSING: {file_path}")
+                dir_result["missing"] += 1
+                results["missing"] += 1
+                dir_result["details"].append(f"MISSING: {file_path}")
                 continue
 
             # Verify size and checksum
             try:
                 actual_size = candidate.stat().st_size
                 if actual_size != expected_size:
-                    logger.warning(f"Size mismatch for {candidate}: expected {expected_size}, got {actual_size}")
-                    dir_result['corrupted'] += 1
-                    results['corrupted'] += 1
-                    dir_result['details'].append(f"SIZE MISMATCH: {candidate} (expected {expected_size}, got {actual_size})")
+                    logger.warning(
+                        f"Size mismatch for {candidate}: expected {expected_size}, got {actual_size}"
+                    )
+                    dir_result["corrupted"] += 1
+                    results["corrupted"] += 1
+                    dir_result["details"].append(
+                        f"SIZE MISMATCH: {candidate} (expected {expected_size}, got {actual_size})"
+                    )
                     continue
 
                 # Verify SHA-256 checksum if recorded in manifest
-                expected_checksum = entry.get('checksum')
+                expected_checksum = entry.get("checksum")
                 if expected_checksum:
                     actual_checksum = calculate_checksum(str(candidate))
                     if actual_checksum != expected_checksum:
-                        logger.warning(f"Checksum mismatch for {candidate}: expected {expected_checksum[:16]}..., got {actual_checksum[:16]}...")
-                        dir_result['corrupted'] += 1
-                        results['corrupted'] += 1
-                        dir_result['details'].append(f"CHECKSUM MISMATCH: {candidate}")
+                        logger.warning(
+                            f"Checksum mismatch for {candidate}: expected {expected_checksum[:16]}..., got {actual_checksum[:16]}..."
+                        )
+                        dir_result["corrupted"] += 1
+                        results["corrupted"] += 1
+                        dir_result["details"].append(f"CHECKSUM MISMATCH: {candidate}")
                         continue
 
-                dir_result['verified'] += 1
-                results['verified'] += 1
+                dir_result["verified"] += 1
+                results["verified"] += 1
             except Exception as e:
                 logger.error(f"Error verifying {candidate}: {e}")
-                dir_result['errors'] += 1
-                results['errors'] += 1
-                dir_result['details'].append(f"ERROR: {candidate}: {e}")
+                dir_result["errors"] += 1
+                results["errors"] += 1
+                dir_result["details"].append(f"ERROR: {candidate}: {e}")
 
-        results['directories'][bdir] = dir_result
+        results["directories"][bdir] = dir_result
 
     return results
 
@@ -176,7 +186,7 @@ def _find_file_in_backup(backup_dir, original_path):
         # Score by how many trailing path components match
         cand_parts = candidate.relative_to(backup_dir).parts
         match_len = 0
-        for o, c in zip(reversed(orig_parts), reversed(cand_parts)):
+        for o, c in zip(reversed(orig_parts), reversed(cand_parts), strict=False):
             if o == c:
                 match_len += 1
             else:
@@ -203,7 +213,7 @@ def _find_encrypted_file(backup_dir, original_path):
         Path or None: Best-matching ``.enc`` file path, or None if not found.
     """
     orig = Path(original_path)
-    enc_name = orig.name + '.enc'
+    enc_name = orig.name + ".enc"
     orig_parts = orig.parts
     best_match = None
     best_match_len = 0
@@ -213,9 +223,9 @@ def _find_encrypted_file(backup_dir, original_path):
             continue
         cand_parts = candidate.relative_to(backup_dir).parts
         # Remove .enc suffix for comparison
-        cand_parts_adj = cand_parts[:-1] + (cand_parts[-1].removesuffix('.enc'),)
+        cand_parts_adj = (*cand_parts[:-1], cand_parts[-1].removesuffix(".enc"))
         match_len = 0
-        for o, c in zip(reversed(orig_parts), reversed(cand_parts_adj)):
+        for o, c in zip(reversed(orig_parts), reversed(cand_parts_adj), strict=False):
             if o == c:
                 match_len += 1
             else:
@@ -253,16 +263,18 @@ def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file
             decrypted = decrypt_file(tmp_enc, passphrase=passphrase, key_file=key_file)
             actual_size = decrypted.stat().st_size
             if actual_size != expected_size:
-                logger.warning(f"Size mismatch for decrypted {enc_path}: expected {expected_size}, got {actual_size}")
-                dir_result['corrupted'] += 1
-                dir_result['details'].append(f"SIZE MISMATCH (decrypted): {enc_path.name}")
+                logger.warning(
+                    f"Size mismatch for decrypted {enc_path}: expected {expected_size}, got {actual_size}"
+                )
+                dir_result["corrupted"] += 1
+                dir_result["details"].append(f"SIZE MISMATCH (decrypted): {enc_path.name}")
                 return False
-            dir_result['verified'] += 1
+            dir_result["verified"] += 1
             return True
     except Exception as e:
         logger.error(f"Failed to verify encrypted file {enc_path}: {e}")
-        dir_result['errors'] += 1
-        dir_result['details'].append(f"DECRYPT ERROR: {enc_path.name}: {e}")
+        dir_result["errors"] += 1
+        dir_result["details"].append(f"DECRYPT ERROR: {enc_path.name}: {e}")
         return False
 
 
@@ -283,19 +295,19 @@ def _verify_files_exist(logger, backup_dir, dir_result):
         int: Total number of files checked.
     """
     count = 0
-    for f in backup_dir.rglob('*'):
+    for f in backup_dir.rglob("*"):
         if not f.is_file():
             continue
-        if f.name.startswith('backup_manifest_') and f.suffix == '.json':
+        if f.name.startswith("backup_manifest_") and f.suffix == ".json":
             continue
         count += 1
         try:
             # Just verify the file is readable
             f.stat()
-            dir_result['verified'] += 1
+            dir_result["verified"] += 1
         except Exception as e:
             logger.error(f"Cannot read file {f}: {e}")
-            dir_result['errors'] += 1
+            dir_result["errors"] += 1
     return count
 
 
@@ -319,18 +331,20 @@ def print_verify_report(results):
     print(f"  Corrupted: {results['corrupted']}")
     print(f"  Errors:    {results['errors']}")
 
-    for bdir, detail in results['directories'].items():
+    for bdir, detail in results["directories"].items():
         print(f"\n  Directory: {bdir}")
         print(f"    Manifest: {'Found' if detail['manifest_found'] else 'Not found (file-only check)'}")
-        print(f"    Verified: {detail['verified']}, Missing: {detail['missing']}, "
-              f"Corrupted: {detail['corrupted']}, Errors: {detail['errors']}")
-        if detail['details']:
-            for line in detail['details'][:20]:  # Cap at 20 lines per dir
+        print(
+            f"    Verified: {detail['verified']}, Missing: {detail['missing']}, "
+            f"Corrupted: {detail['corrupted']}, Errors: {detail['errors']}"
+        )
+        if detail["details"]:
+            for line in detail["details"][:20]:  # Cap at 20 lines per dir
                 print(f"      {line}")
-            if len(detail['details']) > 20:
+            if len(detail["details"]) > 20:
                 print(f"      ... and {len(detail['details']) - 20} more")
 
-    all_ok = results['missing'] == 0 and results['corrupted'] == 0 and results['errors'] == 0
+    all_ok = results["missing"] == 0 and results["corrupted"] == 0 and results["errors"] == 0
     if all_ok:
         print("\nResult: ALL BACKUPS VERIFIED OK")
     else:

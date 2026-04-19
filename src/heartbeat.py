@@ -13,13 +13,12 @@ mirroring webhook_notify's validator.
 
 from __future__ import annotations
 
-from typing import Optional
 from urllib.parse import urlparse
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
-def _validate_url(url: str) -> Optional[str]:
+def _validate_url(url: str) -> str | None:
     if not url or not isinstance(url, str):
         return "heartbeat URL is empty"
     try:

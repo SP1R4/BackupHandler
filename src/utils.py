@@ -6,27 +6,27 @@ execution, checksum calculation, timestamp persistence, keyring access,
 and input validation.
 """
 
+import fnmatch
+import hashlib
+import json
 import os
 import re
-import time
-import json
 import secrets
 import string
-import hashlib
-import fnmatch
 import subprocess
+import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 import keyring
-
 
 # Define file paths for storing timestamps of backups (absolute, relative to project root)
 _PROJECT_ROOT = Path(__file__).parent.parent
 TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "backup_timestamp.json"
 FULL_BACKUP_TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "full_backup_timestamp.json"
 
-def should_exclude(file_path: os.PathLike | str, patterns: Optional[Iterable[str]]) -> bool:
+
+def should_exclude(file_path: os.PathLike | str, patterns: Iterable[str] | None) -> bool:
     """
     Check if a file path matches any of the exclude patterns.
 
@@ -55,7 +55,7 @@ def should_exclude(file_path: os.PathLike | str, patterns: Optional[Iterable[str
     return False
 
 
-def run_hook(logger, command: Optional[str], hook_name: str) -> bool:
+def run_hook(logger, command: str | None, hook_name: str) -> bool:
     """
     Execute a pre/post backup hook command.
 
@@ -71,8 +71,17 @@ def run_hook(logger, command: Optional[str], hook_name: str) -> bool:
         return True
     logger.info(f"Running {hook_name} hook: {command}")
     try:
-        result = subprocess.run(command, shell=True, timeout=300,
-                                capture_output=True, text=True)
+        # shell=True is intentional — hooks are user-supplied commands from
+        # config.ini that may legitimately contain pipes, redirects, or env
+        # expansion. The config file itself is the trust boundary (root-owned,
+        # not user input), so treating its contents as code is expected.
+        result = subprocess.run(  # noqa: S602  # nosec B602
+            command,
+            shell=True,
+            timeout=300,
+            capture_output=True,
+            text=True,
+        )
         if result.stdout.strip():
             logger.info(f"[{hook_name}] stdout: {result.stdout.strip()}")
         if result.stderr.strip():
@@ -105,7 +114,8 @@ def generate_otp(length: int = 16) -> str:
         A randomly generated password using ASCII letters and digits.
     """
     characters = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(characters) for _ in range(length))
+    return "".join(secrets.choice(characters) for _ in range(length))
+
 
 def get_last_backup_time() -> int:
     """
@@ -117,11 +127,12 @@ def get_last_backup_time() -> int:
     Reads the timestamp from a JSON file. Defaults to epoch time if the file does not exist.
     """
     if TIMESTAMP_FILE.exists():
-        with open(TIMESTAMP_FILE, "r") as f:
+        with open(TIMESTAMP_FILE) as f:
             data = json.load(f)
         return data.get("last_backup_time", 0)
     else:
         return 0  # Default to epoch if no backup has been performed
+
 
 def update_last_backup_time() -> None:
     """
@@ -134,6 +145,7 @@ def update_last_backup_time() -> None:
     with open(TIMESTAMP_FILE, "w") as f:
         json.dump(data, f)
 
+
 def get_last_full_backup_time() -> int:
     """
     Retrieve the timestamp of the last full backup.
@@ -144,11 +156,12 @@ def get_last_full_backup_time() -> int:
     Reads the timestamp from a JSON file. Defaults to epoch time if the file does not exist.
     """
     if FULL_BACKUP_TIMESTAMP_FILE.exists():
-        with open(FULL_BACKUP_TIMESTAMP_FILE, "r") as f:
+        with open(FULL_BACKUP_TIMESTAMP_FILE) as f:
             data = json.load(f)
         return data.get("last_full_backup_time", 0)
     else:
         return 0  # Default to epoch if no full backup has been performed
+
 
 def update_last_full_backup_time() -> None:
     """
@@ -161,7 +174,8 @@ def update_last_full_backup_time() -> None:
     with open(FULL_BACKUP_TIMESTAMP_FILE, "w") as f:
         json.dump(data, f)
 
-def calculate_checksum(file_path: os.PathLike | str, logger=None) -> Optional[str]:
+
+def calculate_checksum(file_path: os.PathLike | str, logger=None) -> str | None:
     """
     Calculate the SHA-256 checksum of a file.
 
@@ -183,6 +197,7 @@ def calculate_checksum(file_path: os.PathLike | str, logger=None) -> Optional[st
         return None
     return hash_sha256.hexdigest()
 
+
 def verify_backup(source_file: os.PathLike | str, destination_file: os.PathLike | str) -> bool:
     """
     Verify that a backup file matches the source file by comparing checksums.
@@ -196,6 +211,7 @@ def verify_backup(source_file: os.PathLike | str, destination_file: os.PathLike 
     """
     return calculate_checksum(source_file) == calculate_checksum(destination_file)
 
+
 def _get_backup_checksums(backup: os.PathLike | str) -> dict[str, str]:
     """
     Generate a dictionary of file checksums for all files in the backup directory.
@@ -207,13 +223,14 @@ def _get_backup_checksums(backup: os.PathLike | str) -> dict[str, str]:
     - dict: A dictionary where keys are file paths and values are their SHA-256 checksums.
     """
     checksums = {}
-    for root, dirs, files in os.walk(backup):
+    for root, _dirs, files in os.walk(backup):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             checksum = calculate_checksum(file_path)
             if checksum:
                 checksums[file_path] = checksum
     return checksums
+
 
 def handle_symlink(logger, src_path: str, dst_path: str) -> None:
     """
@@ -228,6 +245,7 @@ def handle_symlink(logger, src_path: str, dst_path: str) -> None:
         logger.info(f"Created symlink '{dst_path}' pointing to '{os.readlink(src_path)}'")
     except OSError as e:
         logger.error(f"Failed to create symlink '{dst_path}': {e}")
+
 
 def validate_directories(logger, source_dir: str, backup_dir: str) -> None:
     """
@@ -250,6 +268,7 @@ def validate_directories(logger, source_dir: str, backup_dir: str) -> None:
         logger.error(f"Error validating directories: {e}")
         raise
 
+
 def list_files_in_directory(directory: os.PathLike | str) -> list[Path]:
     """
     List all files in a directory and its subdirectories.
@@ -260,7 +279,8 @@ def list_files_in_directory(directory: os.PathLike | str) -> list[Path]:
     Returns:
     - List[Path]: A list of file paths in the directory.
     """
-    return [f for f in Path(directory).rglob('*') if f.is_file()]
+    return [f for f in Path(directory).rglob("*") if f.is_file()]
+
 
 def is_valid_email(email: str) -> bool:
     """
@@ -272,10 +292,11 @@ def is_valid_email(email: str) -> bool:
     Returns:
     - bool: True if the email is valid, False otherwise.
     """
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     return re.match(email_pattern, email) is not None
 
-def get_password_by_timestamp(timestamp: str, logger) -> Optional[str]:
+
+def get_password_by_timestamp(timestamp: str, logger) -> str | None:
     """
     Retrieves a password from keyring using a given timestamp as the username.
 
@@ -300,7 +321,8 @@ def get_password_by_timestamp(timestamp: str, logger) -> Optional[str]:
         logger.error(f"Failed to retrieve password for timestamp '{timestamp}': {e}")
         return None
 
-def clear_keyring(service_name: str = 'compression_service', logger=None) -> None:
+
+def clear_keyring(service_name: str = "compression_service", logger=None) -> None:
     """
     Clears all stored credentials in the keyring for the specified service.
 

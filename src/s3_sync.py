@@ -9,14 +9,27 @@ unchanged files. Displays a progress bar via ``tqdm`` during upload.
 
 import os
 from pathlib import Path
+
 from tqdm import tqdm
-from .utils import should_exclude, calculate_checksum
+
+from .utils import calculate_checksum, should_exclude
 
 
-def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
-               access_key=None, secret_key=None, mode='full',
-               exclude_patterns=None, manifest=None,
-               max_bandwidth=None, multipart_threshold=None, max_concurrency=None):
+def sync_to_s3(
+    logger,
+    source_dir,
+    bucket,
+    prefix="",
+    region=None,
+    access_key=None,
+    secret_key=None,
+    mode="full",
+    exclude_patterns=None,
+    manifest=None,
+    max_bandwidth=None,
+    multipart_threshold=None,
+    max_concurrency=None,
+):
     """
     Sync a local directory to an S3 bucket.
 
@@ -50,27 +63,31 @@ def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
     # Create S3 client
     session_kwargs = {}
     if region:
-        session_kwargs['region_name'] = region
+        session_kwargs["region_name"] = region
     if access_key and secret_key:
-        session_kwargs['aws_access_key_id'] = access_key
-        session_kwargs['aws_secret_access_key'] = secret_key
+        session_kwargs["aws_access_key_id"] = access_key
+        session_kwargs["aws_secret_access_key"] = secret_key
 
-    s3 = boto3.client('s3', **session_kwargs)
+    s3 = boto3.client("s3", **session_kwargs)
 
     # Configure transfer settings for bandwidth and multipart uploads
     from boto3.s3.transfer import TransferConfig
+
     transfer_kwargs = {}
     if max_bandwidth:
-        transfer_kwargs['max_bandwidth'] = max_bandwidth * 1024  # KB/s -> bytes/s
+        transfer_kwargs["max_bandwidth"] = max_bandwidth * 1024  # KB/s -> bytes/s
     if multipart_threshold:
-        transfer_kwargs['multipart_threshold'] = multipart_threshold * 1024 * 1024  # MB -> bytes
+        transfer_kwargs["multipart_threshold"] = multipart_threshold * 1024 * 1024  # MB -> bytes
     if max_concurrency:
-        transfer_kwargs['max_concurrency'] = max_concurrency
+        transfer_kwargs["max_concurrency"] = max_concurrency
     transfer_config = TransferConfig(**transfer_kwargs) if transfer_kwargs else None
 
     # Collect files to upload
-    files = [f for f in source_path.rglob('*')
-             if f.is_file() and not should_exclude(f.relative_to(source_path), exclude_patterns)]
+    files = [
+        f
+        for f in source_path.rglob("*")
+        if f.is_file() and not should_exclude(f.relative_to(source_path), exclude_patterns)
+    ]
 
     logger.info(f"Syncing {len(files)} files to s3://{bucket}/{prefix}")
 
@@ -82,18 +99,18 @@ def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
         relative = local_file.relative_to(source_path)
         s3_key = f"{prefix}/{relative}" if prefix else str(relative)
         # Normalize path separators for S3
-        s3_key = s3_key.replace(os.sep, '/')
+        s3_key = s3_key.replace(os.sep, "/")
 
         should_upload = True
 
-        if mode in ('incremental', 'differential'):
+        if mode in ("incremental", "differential"):
             try:
                 response = s3.head_object(Bucket=bucket, Key=s3_key)
-                remote_mtime = response['LastModified'].timestamp()
+                remote_mtime = response["LastModified"].timestamp()
                 local_mtime = local_file.stat().st_mtime
                 should_upload = local_mtime > remote_mtime
             except ClientError as e:
-                if e.response['Error']['Code'] == '404':
+                if e.response["Error"]["Code"] == "404":
                     should_upload = True
                 else:
                     logger.error(f"Error checking S3 object {s3_key}: {e}")
@@ -106,7 +123,7 @@ def sync_to_s3(logger, source_dir, bucket, prefix='', region=None,
             try:
                 upload_kwargs = {}
                 if transfer_config:
-                    upload_kwargs['Config'] = transfer_config
+                    upload_kwargs["Config"] = transfer_config
                 s3.upload_file(str(local_file), bucket, s3_key, **upload_kwargs)
                 logger.info(f"Uploaded {local_file} -> s3://{bucket}/{s3_key}")
                 uploaded += 1

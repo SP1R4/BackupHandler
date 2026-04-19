@@ -13,14 +13,13 @@ Security:
 
 from __future__ import annotations
 
-from typing import Optional
 from urllib.parse import urlparse
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _MAX_BODY_SNIPPET = 200
 
 
-def _validate_url(url: str) -> Optional[str]:
+def _validate_url(url: str) -> str | None:
     """
     Validate a webhook URL.
 
@@ -44,7 +43,7 @@ def send_webhook(
     logger,
     url: str,
     message: str,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
     timeout: int = 30,
 ) -> bool:
     """

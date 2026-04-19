@@ -19,16 +19,16 @@ def _run_cmd(cmd, logger=None, timeout=30):
     except subprocess.TimeoutExpired:
         if logger:
             logger.error(f"Command timed out: {' '.join(cmd)}")
-        return -1, '', 'timeout'
+        return -1, "", "timeout"
     except FileNotFoundError:
         if logger:
             logger.error("tailscale binary not found. Is Tailscale installed?")
-        return -1, '', 'tailscale not found'
+        return -1, "", "tailscale not found"
 
 
 def is_tailscale_installed():
     """Check if the tailscale CLI binary is available."""
-    return shutil.which('tailscale') is not None
+    return shutil.which("tailscale") is not None
 
 
 def get_tailscale_status(logger=None):
@@ -43,36 +43,35 @@ def get_tailscale_status(logger=None):
         - 'backend_state' (str or None): Backend state string
     """
     status = {
-        'running': False,
-        'connected': False,
-        'ip': None,
-        'hostname': None,
-        'backend_state': None,
+        "running": False,
+        "connected": False,
+        "ip": None,
+        "hostname": None,
+        "backend_state": None,
     }
 
-    rc, stdout, stderr = _run_cmd(['tailscale', 'status', '--json'], logger=logger)
+    rc, stdout, _stderr = _run_cmd(["tailscale", "status", "--json"], logger=logger)
     if rc != 0:
         return status
 
     try:
         data = json.loads(stdout)
-        status['running'] = True
-        status['backend_state'] = data.get('BackendState', '')
-        status['connected'] = status['backend_state'] == 'Running'
+        status["running"] = True
+        status["backend_state"] = data.get("BackendState", "")
+        status["connected"] = status["backend_state"] == "Running"
 
-        self_node = data.get('Self', {})
-        ts_ips = self_node.get('TailscaleIPs', [])
+        self_node = data.get("Self", {})
+        ts_ips = self_node.get("TailscaleIPs", [])
         if ts_ips:
-            status['ip'] = ts_ips[0]
-        status['hostname'] = self_node.get('HostName')
+            status["ip"] = ts_ips[0]
+        status["hostname"] = self_node.get("HostName")
     except (json.JSONDecodeError, KeyError):
         pass
 
     return status
 
 
-def tailscale_up(auth_key, logger=None, hostname=None, advertise_tags=None,
-                 accept_routes=False, timeout=60):
+def tailscale_up(auth_key, logger=None, hostname=None, advertise_tags=None, accept_routes=False, timeout=60):
     """
     Bring Tailscale up using a pre-auth key.
 
@@ -94,24 +93,24 @@ def tailscale_up(auth_key, logger=None, hostname=None, advertise_tags=None,
 
     # Check if already connected
     status = get_tailscale_status(logger)
-    if status['connected']:
+    if status["connected"]:
         if logger:
             logger.info(f"Tailscale already connected (IP: {status['ip']}). Skipping 'tailscale up'.")
         return True
 
-    cmd = ['sudo', 'tailscale', 'up', '--authkey', auth_key, '--reset']
+    cmd = ["sudo", "tailscale", "up", "--authkey", auth_key, "--reset"]
 
     if hostname:
-        cmd.extend(['--hostname', hostname])
+        cmd.extend(["--hostname", hostname])
     if advertise_tags:
-        cmd.extend(['--advertise-tags', advertise_tags])
+        cmd.extend(["--advertise-tags", advertise_tags])
     if accept_routes:
-        cmd.append('--accept-routes')
+        cmd.append("--accept-routes")
 
     if logger:
         logger.info("Bringing Tailscale up with pre-auth key...")
 
-    rc, stdout, stderr = _run_cmd(cmd, logger=logger, timeout=timeout)
+    rc, _stdout, stderr = _run_cmd(cmd, logger=logger, timeout=timeout)
 
     if rc != 0:
         if logger:
@@ -120,7 +119,7 @@ def tailscale_up(auth_key, logger=None, hostname=None, advertise_tags=None,
 
     # Verify connection
     status = get_tailscale_status(logger)
-    if status['connected']:
+    if status["connected"]:
         if logger:
             logger.info(f"Tailscale connected successfully (IP: {status['ip']})")
         return True
@@ -141,7 +140,7 @@ def tailscale_down(logger=None):
         return True
 
     status = get_tailscale_status(logger)
-    if not status['connected']:
+    if not status["connected"]:
         if logger:
             logger.info("Tailscale already disconnected.")
         return True
@@ -149,7 +148,7 @@ def tailscale_down(logger=None):
     if logger:
         logger.info("Bringing Tailscale down...")
 
-    rc, stdout, stderr = _run_cmd(['sudo', 'tailscale', 'down'], logger=logger)
+    rc, _stdout, stderr = _run_cmd(["sudo", "tailscale", "down"], logger=logger)
 
     if rc != 0:
         if logger:
@@ -172,9 +171,9 @@ def resolve_tailscale_ip(hostname, logger=None):
     Returns:
         str or None: The Tailscale IP address, or None if resolution failed.
     """
-    rc, stdout, stderr = _run_cmd(['tailscale', 'ip', '-4', hostname], logger=logger)
+    rc, stdout, stderr = _run_cmd(["tailscale", "ip", "-4", hostname], logger=logger)
     if rc == 0 and stdout:
-        return stdout.split('\n')[0]
+        return stdout.split("\n")[0]
 
     if logger:
         logger.warning(f"Could not resolve Tailscale IP for '{hostname}': {stderr}")

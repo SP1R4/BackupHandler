@@ -8,23 +8,28 @@ rebuild the system after a fresh OS install.
 Collectors are organized by category and gracefully skip unavailable tools.
 """
 
-import os
-import sys
-import json
 import base64
-import shutil
+import contextlib
+import json
+import os
 import platform
+import shutil
 import subprocess
-from pathlib import Path
+import sys
 from datetime import datetime
-
+from pathlib import Path
 
 # ─── Utility ────────────────────────────────────────────────────────────────
 
+
 def _run(cmd, timeout=30, shell=False):
-    """Run a command and return stdout lines, or empty list on failure."""
+    """Run a command and return stdout lines, or empty list on failure.
+
+    shell is opt-in and only used by callers passing a trusted, fixed command
+    string (e.g., 'lsblk | awk ...'); never user-controlled input.
+    """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B602
             cmd, capture_output=True, text=True, timeout=timeout, shell=shell
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -36,8 +41,8 @@ def _run(cmd, timeout=30, shell=False):
 
 def _run_single(cmd, timeout=30, shell=False):
     """Run a command and return stdout as a single string, or None."""
-    lines = _run(cmd, timeout=timeout, shell=shell)
-    return '\n'.join(lines) if lines else None
+    lines = _run(cmd, timeout=timeout, shell=shell)  # nosec B604
+    return "\n".join(lines) if lines else None
 
 
 def _which(name):
@@ -46,11 +51,11 @@ def _which(name):
 
 
 def _is_linux():
-    return platform.system() == 'Linux'
+    return platform.system() == "Linux"
 
 
 def _is_windows():
-    return platform.system() == 'Windows'
+    return platform.system() == "Windows"
 
 
 def _home():
@@ -59,10 +64,11 @@ def _home():
 
 # ─── Linux Collectors ───────────────────────────────────────────────────────
 
+
 def _collect_apt_packages(logger):
     """Collect manually installed APT packages (not auto-installed deps)."""
     logger.info("Collecting APT packages...")
-    lines = _run(['apt-mark', 'showmanual'])
+    lines = _run(["apt-mark", "showmanual"])
     logger.info(f"  Found {len(lines)} manually installed APT packages")
     return lines
 
@@ -73,60 +79,68 @@ def _collect_apt_repositories(logger):
     repos = []
 
     # Sources list files
-    sources_dir = Path('/etc/apt/sources.list.d')
+    sources_dir = Path("/etc/apt/sources.list.d")
     if sources_dir.exists():
         for f in sorted(sources_dir.iterdir()):
-            if f.suffix in ('.list', '.sources'):
+            if f.suffix in (".list", ".sources"):
                 try:
                     content = f.read_text().strip()
                     if content:
-                        repos.append({
-                            'file': f.name,
-                            'content': content
-                        })
+                        repos.append({"file": f.name, "content": content})
                 except PermissionError:
                     pass
 
     # GPG keys for repos
-    keyrings_dir = Path('/etc/apt/keyrings')
+    keyrings_dir = Path("/etc/apt/keyrings")
     keyring_files = []
     if keyrings_dir.exists():
         for f in sorted(keyrings_dir.iterdir()):
-            if f.suffix in ('.gpg', '.asc'):
+            if f.suffix in (".gpg", ".asc"):
                 keyring_files.append(f.name)
 
     # Also check /usr/share/keyrings for custom ones
-    usr_keyrings = Path('/usr/share/keyrings')
+    usr_keyrings = Path("/usr/share/keyrings")
     if usr_keyrings.exists():
         for f in sorted(usr_keyrings.iterdir()):
-            if f.suffix in ('.gpg', '.asc') and not f.name.startswith('ubuntu'):
-                keyring_files.append(f'usr-share-keyrings/{f.name}')
+            if f.suffix in (".gpg", ".asc") and not f.name.startswith("ubuntu"):
+                keyring_files.append(f"usr-share-keyrings/{f.name}")
 
     logger.info(f"  Found {len(repos)} repository sources, {len(keyring_files)} keyring files")
-    return {'sources': repos, 'keyrings': keyring_files}
+    return {"sources": repos, "keyrings": keyring_files}
 
 
 def _collect_snap_packages(logger):
     """Collect installed Snap packages."""
-    if not _which('snap'):
+    if not _which("snap"):
         return []
     logger.info("Collecting Snap packages...")
-    lines = _run(['snap', 'list'])
+    lines = _run(["snap", "list"])
     packages = []
     for line in lines[1:]:  # Skip header
         parts = line.split()
-        if parts and parts[0] not in ('bare', 'core', 'core18', 'core20',
-                                       'core22', 'core24', 'snapd',
-                                       'gnome-3-28-1804', 'gnome-3-38-2004',
-                                       'gnome-42-2204', 'gnome-46-2404',
-                                       'gtk-common-themes',
-                                       'snap-store', 'snapd-desktop-integration',
-                                       'mesa-2404', 'firmware-updater'):
-            pkg = {'name': parts[0], 'version': parts[1] if len(parts) > 1 else ''}
+        if parts and parts[0] not in (
+            "bare",
+            "core",
+            "core18",
+            "core20",
+            "core22",
+            "core24",
+            "snapd",
+            "gnome-3-28-1804",
+            "gnome-3-38-2004",
+            "gnome-42-2204",
+            "gnome-46-2404",
+            "gtk-common-themes",
+            "snap-store",
+            "snapd-desktop-integration",
+            "mesa-2404",
+            "firmware-updater",
+        ):
+            pkg = {"name": parts[0], "version": parts[1] if len(parts) > 1 else ""}
             if len(parts) > 5 and parts[5]:
-                pkg['channel'] = parts[3] if len(parts) > 3 else ''
-            if '--classic' in line.lower() or (len(parts) > 6 and 'classic' in parts[6]):
-                pkg['classic'] = True
+                pkg["channel"] = parts[3] if len(parts) > 3 else ""
+            if "--classic" in line.lower() or (len(parts) > 6 and "classic" in parts[6]):
+                pkg["classic"] = True
             packages.append(pkg)
     logger.info(f"  Found {len(packages)} Snap packages")
     return packages
@@ -134,17 +148,17 @@ def _collect_snap_packages(logger):
 
 def _collect_flatpak_packages(logger):
     """Collect installed Flatpak packages."""
-    if not _which('flatpak'):
+    if not _which("flatpak"):
         return []
     logger.info("Collecting Flatpak packages...")
-    lines = _run(['flatpak', 'list', '--app', '--columns=application,origin'])
+    lines = _run(["flatpak", "list", "--app", "--columns=application,origin"])
     packages = []
     for line in lines:
-        parts = line.split('\t')
+        parts = line.split("\t")
         if parts:
-            pkg = {'app_id': parts[0].strip()}
+            pkg = {"app_id": parts[0].strip()}
             if len(parts) > 1:
-                pkg['origin'] = parts[1].strip()
+                pkg["origin"] = parts[1].strip()
             packages.append(pkg)
     logger.info(f"  Found {len(packages)} Flatpak packages")
     return packages
@@ -155,25 +169,25 @@ def _collect_pip_packages(logger):
     result = {}
 
     # pipx packages
-    if _which('pipx'):
+    if _which("pipx"):
         logger.info("Collecting pipx packages...")
-        lines = _run(['pipx', 'list', '--short'])
+        lines = _run(["pipx", "list", "--short"])
         pipx_pkgs = []
         for line in lines:
             parts = line.split()
             if parts:
                 pipx_pkgs.append(parts[0])
-        result['pipx'] = pipx_pkgs
+        result["pipx"] = pipx_pkgs
         logger.info(f"  Found {len(pipx_pkgs)} pipx packages")
 
     # pip user packages (--user)
     logger.info("Collecting pip user packages...")
-    lines = _run([sys.executable, '-m', 'pip', 'list', '--user', '--format=freeze'])
+    lines = _run([sys.executable, "-m", "pip", "list", "--user", "--format=freeze"])
     pip_user = []
     for line in lines:
-        if '==' in line:
-            pip_user.append(line.split('==')[0])
-    result['pip_user'] = pip_user
+        if "==" in line:
+            pip_user.append(line.split("==")[0])
+    result["pip_user"] = pip_user
     logger.info(f"  Found {len(pip_user)} pip user packages")
 
     return result
@@ -181,15 +195,15 @@ def _collect_pip_packages(logger):
 
 def _collect_npm_packages(logger):
     """Collect globally installed npm packages."""
-    if not _which('npm'):
+    if not _which("npm"):
         return []
     logger.info("Collecting npm global packages...")
-    lines = _run(['npm', 'list', '-g', '--depth=0', '--json'], timeout=15)
+    lines = _run(["npm", "list", "-g", "--depth=0", "--json"], timeout=15)
     if not lines:
         return []
     try:
-        data = json.loads('\n'.join(lines))
-        deps = data.get('dependencies', {})
+        data = json.loads("\n".join(lines))
+        deps = data.get("dependencies", {})
         packages = list(deps.keys())
         logger.info(f"  Found {len(packages)} npm global packages")
         return packages
@@ -199,30 +213,30 @@ def _collect_npm_packages(logger):
 
 def _collect_cargo_packages(logger):
     """Collect cargo-installed binaries."""
-    if not _which('cargo'):
+    if not _which("cargo"):
         return []
     logger.info("Collecting Cargo packages...")
-    cargo_bin = _home() / '.cargo' / 'bin'
+    cargo_bin = _home() / ".cargo" / "bin"
     if not cargo_bin.exists():
         return []
     # Get installed crates from cargo install --list
-    lines = _run(['cargo', 'install', '--list'], timeout=30)
+    lines = _run(["cargo", "install", "--list"], timeout=30)
     packages = []
     for line in lines:
-        if not line.startswith(' ') and ' v' in line:
-            name = line.split(' v')[0].strip()
-            version = line.split(' v')[1].strip().rstrip(':')
-            packages.append({'name': name, 'version': version})
+        if not line.startswith(" ") and " v" in line:
+            name = line.split(" v")[0].strip()
+            version = line.split(" v")[1].strip().rstrip(":")
+            packages.append({"name": name, "version": version})
     logger.info(f"  Found {len(packages)} Cargo packages")
     return packages
 
 
 def _collect_go_packages(logger):
     """Collect go-installed binaries."""
-    if not _which('go'):
+    if not _which("go"):
         return []
     logger.info("Collecting Go binaries...")
-    gobin = Path(os.environ.get('GOBIN', _home() / 'go' / 'bin'))
+    gobin = Path(os.environ.get("GOBIN", _home() / "go" / "bin"))
     if not gobin.exists():
         return []
     binaries = [f.name for f in gobin.iterdir() if f.is_file() and os.access(f, os.X_OK)]
@@ -235,12 +249,20 @@ def _collect_dotfiles(logger):
     logger.info("Collecting dotfiles...")
     home = _home()
     dotfile_paths = [
-        '.bashrc', '.bash_aliases', '.bash_profile', '.profile',
-        '.zshrc', '.zsh_aliases', '.zprofile',
-        '.gitconfig', '.gitignore_global',
-        '.ssh/config',
-        '.tmux.conf', '.vimrc', '.nanorc',
-        '.config/starship.toml',
+        ".bashrc",
+        ".bash_aliases",
+        ".bash_profile",
+        ".profile",
+        ".zshrc",
+        ".zsh_aliases",
+        ".zprofile",
+        ".gitconfig",
+        ".gitignore_global",
+        ".ssh/config",
+        ".tmux.conf",
+        ".vimrc",
+        ".nanorc",
+        ".config/starship.toml",
     ]
 
     collected = {}
@@ -248,7 +270,7 @@ def _collect_dotfiles(logger):
         full_path = home / rel_path
         if full_path.exists() and full_path.is_file():
             try:
-                content = full_path.read_text(errors='replace')
+                content = full_path.read_text(errors="replace")
                 collected[rel_path] = content
             except (PermissionError, OSError):
                 pass
@@ -260,20 +282,22 @@ def _collect_dotfiles(logger):
 def _collect_ssh_keys_info(logger):
     """Collect SSH key metadata (NOT private keys — just filenames and types for reference)."""
     logger.info("Collecting SSH key info...")
-    ssh_dir = _home() / '.ssh'
+    ssh_dir = _home() / ".ssh"
     if not ssh_dir.exists():
         return []
     keys = []
     for f in sorted(ssh_dir.iterdir()):
-        if f.suffix == '.pub':
+        if f.suffix == ".pub":
             try:
                 content = f.read_text().strip()
                 parts = content.split()
-                keys.append({
-                    'name': f.stem,
-                    'type': parts[0] if parts else 'unknown',
-                    'comment': parts[2] if len(parts) > 2 else '',
-                })
+                keys.append(
+                    {
+                        "name": f.stem,
+                        "type": parts[0] if parts else "unknown",
+                        "comment": parts[2] if len(parts) > 2 else "",
+                    }
+                )
             except (PermissionError, OSError):
                 pass
     logger.info(f"  Found {len(keys)} SSH keys (public metadata only)")
@@ -282,23 +306,22 @@ def _collect_ssh_keys_info(logger):
 
 def _collect_gpg_keys(logger):
     """Collect GPG key IDs and metadata."""
-    if not _which('gpg'):
+    if not _which("gpg"):
         return []
     logger.info("Collecting GPG keys...")
-    lines = _run(['gpg', '--list-keys', '--keyid-format', 'long', '--with-colons'])
+    lines = _run(["gpg", "--list-keys", "--keyid-format", "long", "--with-colons"])
     keys = []
-    current_uid = None
     for line in lines:
-        parts = line.split(':')
-        if parts[0] == 'pub':
+        parts = line.split(":")
+        if parts[0] == "pub":
             current_key = {
-                'keyid': parts[4],
-                'creation': parts[5],
-                'algo': parts[3],
+                "keyid": parts[4],
+                "creation": parts[5],
+                "algo": parts[3],
             }
             keys.append(current_key)
-        elif parts[0] == 'uid' and keys:
-            keys[-1]['uid'] = parts[9]
+        elif parts[0] == "uid" and keys:
+            keys[-1]["uid"] = parts[9]
     logger.info(f"  Found {len(keys)} GPG keys")
     return keys
 
@@ -306,18 +329,27 @@ def _collect_gpg_keys(logger):
 def _collect_cron_jobs(logger):
     """Collect user crontab entries."""
     logger.info("Collecting cron jobs...")
-    lines = _run(['crontab', '-l'])
-    if lines and 'no crontab' not in lines[0].lower():
+    lines = _run(["crontab", "-l"])
+    if lines and "no crontab" not in lines[0].lower():
         logger.info(f"  Found {len(lines)} crontab lines")
-        return '\n'.join(lines)
+        return "\n".join(lines)
     return None
 
 
 def _collect_systemd_user_services(logger):
     """Collect enabled user systemd services."""
     logger.info("Collecting systemd user services...")
-    lines = _run(['systemctl', '--user', 'list-unit-files', '--state=enabled',
-                   '--type=service', '--no-legend', '--no-pager'])
+    lines = _run(
+        [
+            "systemctl",
+            "--user",
+            "list-unit-files",
+            "--state=enabled",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+        ]
+    )
     services = []
     for line in lines:
         parts = line.split()
@@ -329,10 +361,10 @@ def _collect_systemd_user_services(logger):
 
 def _collect_dconf_settings(logger):
     """Dump GNOME/desktop settings via dconf."""
-    if not _which('dconf'):
+    if not _which("dconf"):
         return None
     logger.info("Collecting dconf/GNOME settings...")
-    dump = _run_single(['dconf', 'dump', '/'], timeout=10)
+    dump = _run_single(["dconf", "dump", "/"], timeout=10)
     if dump:
         logger.info(f"  Captured dconf dump ({len(dump)} bytes)")
     return dump
@@ -341,14 +373,14 @@ def _collect_dconf_settings(logger):
 def _collect_vscode_extensions(logger):
     """Collect VS Code extensions list."""
     code_cmd = None
-    for cmd in ['code', 'code-insiders']:
+    for cmd in ["code", "code-insiders"]:
         if _which(cmd):
             code_cmd = cmd
             break
     if not code_cmd:
         return []
     logger.info("Collecting VS Code extensions...")
-    lines = _run([code_cmd, '--list-extensions'], timeout=15)
+    lines = _run([code_cmd, "--list-extensions"], timeout=15)
     logger.info(f"  Found {len(lines)} VS Code extensions")
     return lines
 
@@ -357,8 +389,8 @@ def _collect_vscode_settings(logger):
     """Collect VS Code user settings.json."""
     logger.info("Collecting VS Code settings...")
     settings_paths = [
-        _home() / '.config' / 'Code' / 'User' / 'settings.json',
-        _home() / '.config' / 'Code - Insiders' / 'User' / 'settings.json',
+        _home() / ".config" / "Code" / "User" / "settings.json",
+        _home() / ".config" / "Code - Insiders" / "User" / "settings.json",
     ]
     for p in settings_paths:
         if p.exists():
@@ -376,19 +408,20 @@ def _collect_sublime_settings(logger):
     logger.info("Collecting Sublime Text settings...")
     result = {}
 
-    subl_config = _home() / '.config' / 'sublime-text' / 'Packages' / 'User'
+    subl_config = _home() / ".config" / "sublime-text" / "Packages" / "User"
     if not subl_config.exists():
-        subl_config = _home() / '.config' / 'sublime-text-3' / 'Packages' / 'User'
+        subl_config = _home() / ".config" / "sublime-text-3" / "Packages" / "User"
 
     if subl_config.exists():
-        for fname in ('Preferences.sublime-settings', 'Package Control.sublime-settings',
-                      'Default (Linux).sublime-keymap'):
+        for fname in (
+            "Preferences.sublime-settings",
+            "Package Control.sublime-settings",
+            "Default (Linux).sublime-keymap",
+        ):
             fpath = subl_config / fname
             if fpath.exists():
-                try:
+                with contextlib.suppress(PermissionError, OSError):
                     result[fname] = fpath.read_text()
-                except (PermissionError, OSError):
-                    pass
 
     if result:
         logger.info(f"  Found {len(result)} Sublime Text config files")
@@ -399,25 +432,29 @@ def _collect_network_connections(logger):
     """Collect NetworkManager saved connections (WiFi, VPN configs)."""
     logger.info("Collecting network connections...")
     connections = []
-    nm_dir = Path('/etc/NetworkManager/system-connections')
+    nm_dir = Path("/etc/NetworkManager/system-connections")
     if nm_dir.exists():
         for f in sorted(nm_dir.iterdir()):
-            if f.suffix in ('.nmconnection', ''):
+            if f.suffix in (".nmconnection", ""):
                 try:
                     content = f.read_text()
                     # Redact WiFi passwords — flag for manual re-entry
-                    connections.append({
-                        'name': f.stem,
-                        'file': f.name,
-                        'has_wifi_psk': 'psk=' in content,
-                        'type': _extract_nm_type(content),
-                    })
+                    connections.append(
+                        {
+                            "name": f.stem,
+                            "file": f.name,
+                            "has_wifi_psk": "psk=" in content,
+                            "type": _extract_nm_type(content),
+                        }
+                    )
                 except PermissionError:
-                    connections.append({
-                        'name': f.stem,
-                        'file': f.name,
-                        'readable': False,
-                    })
+                    connections.append(
+                        {
+                            "name": f.stem,
+                            "file": f.name,
+                            "readable": False,
+                        }
+                    )
     logger.info(f"  Found {len(connections)} network connections")
     return connections
 
@@ -425,20 +462,20 @@ def _collect_network_connections(logger):
 def _extract_nm_type(content):
     """Extract connection type from NM config."""
     for line in content.splitlines():
-        if line.strip().startswith('type='):
-            return line.strip().split('=', 1)[1]
-    return 'unknown'
+        if line.strip().startswith("type="):
+            return line.strip().split("=", 1)[1]
+    return "unknown"
 
 
 def _collect_wireguard_configs(logger):
     """Collect WireGuard config file names (not contents — they contain private keys)."""
     logger.info("Collecting WireGuard configs...")
-    wg_dir = Path('/etc/wireguard')
+    wg_dir = Path("/etc/wireguard")
     configs = []
     if wg_dir.exists():
         try:
             for f in sorted(wg_dir.iterdir()):
-                if f.suffix == '.conf':
+                if f.suffix == ".conf":
                     configs.append(f.stem)
         except PermissionError:
             pass
@@ -449,7 +486,7 @@ def _collect_wireguard_configs(logger):
 def _collect_hosts_file(logger):
     """Collect custom /etc/hosts entries."""
     logger.info("Collecting /etc/hosts customizations...")
-    hosts_path = Path('/etc/hosts')
+    hosts_path = Path("/etc/hosts")
     if not hosts_path.exists():
         return None
     try:
@@ -458,18 +495,24 @@ def _collect_hosts_file(logger):
         custom_lines = []
         for line in content.splitlines():
             stripped = line.strip()
-            if (stripped and not stripped.startswith('#') and
-                    stripped not in ('127.0.0.1 localhost',
-                                     '127.0.1.1 ' + platform.node(),
-                                     '::1 localhost ip6-localhost ip6-loopback',
-                                     'ff02::1 ip6-allnodes',
-                                     'ff02::2 ip6-allrouters',
-                                     '::1     ip6-localhost ip6-loopback',
-                                     'fe00::0 ip6-localnet')):
+            if (
+                stripped
+                and not stripped.startswith("#")
+                and stripped
+                not in (
+                    "127.0.0.1 localhost",
+                    "127.0.1.1 " + platform.node(),
+                    "::1 localhost ip6-localhost ip6-loopback",
+                    "ff02::1 ip6-allnodes",
+                    "ff02::2 ip6-allrouters",
+                    "::1     ip6-localhost ip6-loopback",
+                    "fe00::0 ip6-localnet",
+                )
+            ):
                 custom_lines.append(line)
         if custom_lines:
             logger.info(f"  Found {len(custom_lines)} custom host entries")
-            return '\n'.join(custom_lines)
+            return "\n".join(custom_lines)
     except PermissionError:
         pass
     return None
@@ -478,7 +521,7 @@ def _collect_hosts_file(logger):
 def _collect_fstab(logger):
     """Collect /etc/fstab for reference."""
     logger.info("Collecting /etc/fstab...")
-    fstab = Path('/etc/fstab')
+    fstab = Path("/etc/fstab")
     if fstab.exists():
         try:
             content = fstab.read_text()
@@ -493,14 +536,14 @@ def _collect_fonts(logger):
     """Collect user-installed font names."""
     logger.info("Collecting user fonts...")
     font_dirs = [
-        _home() / '.local' / 'share' / 'fonts',
-        _home() / '.fonts',
+        _home() / ".local" / "share" / "fonts",
+        _home() / ".fonts",
     ]
     fonts = []
     for d in font_dirs:
         if d.exists():
-            for f in d.rglob('*'):
-                if f.suffix.lower() in ('.ttf', '.otf', '.woff', '.woff2'):
+            for f in d.rglob("*"):
+                if f.suffix.lower() in (".ttf", ".otf", ".woff", ".woff2"):
                     fonts.append(str(f.relative_to(d)))
     logger.info(f"  Found {len(fonts)} user fonts")
     return fonts
@@ -510,13 +553,13 @@ def _collect_shell_history(logger):
     """Collect shell history files (last 5000 entries)."""
     logger.info("Collecting shell history...")
     history_files = {}
-    for name in ('.bash_history', '.zsh_history'):
+    for name in (".bash_history", ".zsh_history"):
         path = _home() / name
         if path.exists():
             try:
-                lines = path.read_text(errors='replace').splitlines()
+                lines = path.read_text(errors="replace").splitlines()
                 # Keep last 5000 entries
-                history_files[name] = '\n'.join(lines[-5000:])
+                history_files[name] = "\n".join(lines[-5000:])
                 logger.info(f"  {name}: {len(lines)} entries (keeping last 5000)")
             except (PermissionError, OSError):
                 pass
@@ -527,44 +570,46 @@ def _collect_custom_bin(logger):
     """Collect list of custom scripts in common bin directories."""
     logger.info("Collecting custom scripts/binaries...")
     bin_dirs = [
-        _home() / 'bin',
-        _home() / '.local' / 'bin',
+        _home() / "bin",
+        _home() / ".local" / "bin",
     ]
     scripts = []
     for d in bin_dirs:
         if d.exists():
             for f in sorted(d.iterdir()):
                 if f.is_file() and os.access(f, os.X_OK):
-                    scripts.append({
-                        'path': str(f.relative_to(_home())),
-                        'size': f.stat().st_size,
-                    })
+                    scripts.append(
+                        {
+                            "path": str(f.relative_to(_home())),
+                            "size": f.stat().st_size,
+                        }
+                    )
     logger.info(f"  Found {len(scripts)} custom scripts")
     return scripts
 
 
 def _collect_docker_info(logger):
     """Collect Docker images and compose file locations."""
-    if not _which('docker'):
+    if not _which("docker"):
         return None
     logger.info("Collecting Docker info...")
     result = {}
 
     # Images
-    lines = _run(['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}'], timeout=10)
-    result['images'] = [l for l in lines if l and '<none>' not in l]
+    lines = _run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], timeout=10)
+    result["images"] = [line for line in lines if line and "<none>" not in line]
 
     # Find compose files
     compose_files = []
-    projects_dir = _home() / 'projects'
+    projects_dir = _home() / "projects"
     if projects_dir.exists():
-        for f in projects_dir.rglob('docker-compose*.yml'):
+        for f in projects_dir.rglob("docker-compose*.yml"):
             compose_files.append(str(f.relative_to(_home())))
-        for f in projects_dir.rglob('docker-compose*.yaml'):
+        for f in projects_dir.rglob("docker-compose*.yaml"):
             compose_files.append(str(f.relative_to(_home())))
-        for f in projects_dir.rglob('compose*.yml'):
+        for f in projects_dir.rglob("compose*.yml"):
             compose_files.append(str(f.relative_to(_home())))
-    result['compose_files'] = compose_files
+    result["compose_files"] = compose_files
 
     logger.info(f"  Found {len(result['images'])} images, {len(compose_files)} compose files")
     return result
@@ -576,31 +621,31 @@ def _collect_browser_profiles(logger):
     browsers = {}
 
     # Firefox (snap)
-    ff_profiles = _home() / 'snap' / 'firefox' / 'common' / '.mozilla' / 'firefox'
+    ff_profiles = _home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
     if not ff_profiles.exists():
-        ff_profiles = _home() / '.mozilla' / 'firefox'
+        ff_profiles = _home() / ".mozilla" / "firefox"
     if ff_profiles.exists():
-        profiles_ini = ff_profiles / 'profiles.ini'
+        profiles_ini = ff_profiles / "profiles.ini"
         if profiles_ini.exists():
             try:
-                browsers['firefox'] = {
-                    'path': str(ff_profiles),
-                    'profiles_ini': profiles_ini.read_text(),
+                browsers["firefox"] = {
+                    "path": str(ff_profiles),
+                    "profiles_ini": profiles_ini.read_text(),
                 }
             except (PermissionError, OSError):
-                browsers['firefox'] = {'path': str(ff_profiles)}
+                browsers["firefox"] = {"path": str(ff_profiles)}
 
     # Brave
-    brave_dir = _home() / '.config' / 'BraveSoftware' / 'Brave-Browser'
+    brave_dir = _home() / ".config" / "BraveSoftware" / "Brave-Browser"
     if not brave_dir.exists():
-        brave_dir = _home() / 'snap' / 'brave' / 'current' / '.config' / 'BraveSoftware' / 'Brave-Browser'
+        brave_dir = _home() / "snap" / "brave" / "current" / ".config" / "BraveSoftware" / "Brave-Browser"
     if brave_dir.exists():
-        browsers['brave'] = {'path': str(brave_dir)}
+        browsers["brave"] = {"path": str(brave_dir)}
 
     # Chrome
-    chrome_dir = _home() / '.config' / 'google-chrome'
+    chrome_dir = _home() / ".config" / "google-chrome"
     if chrome_dir.exists():
-        browsers['chrome'] = {'path': str(chrome_dir)}
+        browsers["chrome"] = {"path": str(chrome_dir)}
 
     logger.info(f"  Found {len(browsers)} browser profiles")
     return browsers
@@ -608,39 +653,40 @@ def _collect_browser_profiles(logger):
 
 # ─── Windows Collectors ─────────────────────────────────────────────────────
 
+
 def _collect_winget_packages(logger):
     """Collect winget-installed packages."""
-    if not _which('winget'):
+    if not _which("winget"):
         return []
     logger.info("Collecting winget packages...")
-    lines = _run(['winget', 'list', '--source', 'winget'], timeout=30)
+    lines = _run(["winget", "list", "--source", "winget"], timeout=30)
     packages = []
     # Skip header lines
     started = False
     for line in lines:
-        if '---' in line:
+        if "---" in line:
             started = True
             continue
         if started and line.strip():
             parts = line.split()
             if len(parts) >= 2:
-                packages.append(parts[-2] if '.' in parts[-2] else parts[0])
+                packages.append(parts[-2] if "." in parts[-2] else parts[0])
     logger.info(f"  Found {len(packages)} winget packages")
     return packages
 
 
 def _collect_choco_packages(logger):
     """Collect Chocolatey-installed packages."""
-    if not _which('choco'):
+    if not _which("choco"):
         return []
     logger.info("Collecting Chocolatey packages...")
-    lines = _run(['choco', 'list', '--local-only'], timeout=30)
+    lines = _run(["choco", "list", "--local-only"], timeout=30)
     packages = []
     for line in lines:
-        if ' ' in line and not line.startswith('Chocolatey'):
+        if " " in line and not line.startswith("Chocolatey"):
             parts = line.split()
-            if len(parts) >= 2 and not parts[0].endswith(':'):
-                packages.append({'name': parts[0], 'version': parts[1]})
+            if len(parts) >= 2 and not parts[0].endswith(":"):
+                packages.append({"name": parts[0], "version": parts[1]})
     logger.info(f"  Found {len(packages)} Chocolatey packages")
     return packages
 
@@ -650,12 +696,13 @@ def _collect_windows_env_vars(logger):
     if not _is_windows():
         return {}
     logger.info("Collecting Windows user environment variables...")
-    lines = _run(['powershell', '-Command',
-                   '[Environment]::GetEnvironmentVariables("User") | ConvertTo-Json'],
-                  timeout=10)
+    lines = _run(
+        ["powershell", "-Command", '[Environment]::GetEnvironmentVariables("User") | ConvertTo-Json'],
+        timeout=10,
+    )
     if lines:
         try:
-            return json.loads('\n'.join(lines))
+            return json.loads("\n".join(lines))
         except json.JSONDecodeError:
             pass
     return {}
@@ -663,15 +710,15 @@ def _collect_windows_env_vars(logger):
 
 def _collect_wsl_distros(logger):
     """Collect WSL distributions."""
-    if not _which('wsl'):
+    if not _which("wsl"):
         return []
     logger.info("Collecting WSL distributions...")
-    lines = _run(['wsl', '--list', '--verbose'], timeout=10)
+    lines = _run(["wsl", "--list", "--verbose"], timeout=10)
     distros = []
     for line in lines[1:]:  # Skip header
         parts = line.strip().split()
         if parts:
-            name = parts[0].replace('*', '').strip()
+            name = parts[0].replace("*", "").strip()
             if name:
                 distros.append(name)
     logger.info(f"  Found {len(distros)} WSL distributions")
@@ -683,19 +730,25 @@ def _collect_windows_scheduled_tasks(logger):
     if not _is_windows():
         return []
     logger.info("Collecting Windows scheduled tasks...")
-    lines = _run(['powershell', '-Command',
-                   'Get-ScheduledTask | Where-Object {$_.Author -notlike "Microsoft*"} '
-                   '| Select-Object TaskName, TaskPath, State | ConvertTo-Json'],
-                  timeout=15)
+    lines = _run(
+        [
+            "powershell",
+            "-Command",
+            'Get-ScheduledTask | Where-Object {$_.Author -notlike "Microsoft*"} '
+            "| Select-Object TaskName, TaskPath, State | ConvertTo-Json",
+        ],
+        timeout=15,
+    )
     if lines:
         try:
-            return json.loads('\n'.join(lines))
+            return json.loads("\n".join(lines))
         except json.JSONDecodeError:
             pass
     return []
 
 
 # ─── Main Snapshot Function ─────────────────────────────────────────────────
+
 
 def create_snapshot(logger, output_dir=None, output_file=None):
     """
@@ -712,100 +765,100 @@ def create_snapshot(logger, output_dir=None, output_file=None):
     Returns:
         str: Path to the saved snapshot file.
     """
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     os_type = platform.system()
     hostname = platform.node()
 
     logger.info(f"Creating system snapshot on {hostname} ({os_type})...")
 
     snapshot = {
-        'metadata': {
-            'timestamp': timestamp,
-            'datetime': datetime.now().isoformat(),
-            'hostname': hostname,
-            'os': os_type,
-            'os_release': _run_single(['lsb_release', '-d', '-s']) if _is_linux() else platform.version(),
-            'os_version': platform.release(),
-            'arch': platform.machine(),
-            'python_version': platform.python_version(),
-            'user': os.environ.get('USER', os.environ.get('USERNAME', 'unknown')),
-            'home': str(_home()),
-            'snapshot_version': '1.0',
+        "metadata": {
+            "timestamp": timestamp,
+            "datetime": datetime.now().isoformat(),
+            "hostname": hostname,
+            "os": os_type,
+            "os_release": _run_single(["lsb_release", "-d", "-s"]) if _is_linux() else platform.version(),
+            "os_version": platform.release(),
+            "arch": platform.machine(),
+            "python_version": platform.python_version(),
+            "user": os.environ.get("USER", os.environ.get("USERNAME", "unknown")),
+            "home": str(_home()),
+            "snapshot_version": "1.0",
         },
-        'packages': {},
-        'configs': {},
-        'security': {},
-        'network': {},
-        'apps': {},
-        'system': {},
+        "packages": {},
+        "configs": {},
+        "security": {},
+        "network": {},
+        "apps": {},
+        "system": {},
     }
 
     if _is_linux():
         # Packages
-        snapshot['packages']['apt'] = _collect_apt_packages(logger)
-        snapshot['packages']['apt_repos'] = _collect_apt_repositories(logger)
-        snapshot['packages']['snap'] = _collect_snap_packages(logger)
-        snapshot['packages']['flatpak'] = _collect_flatpak_packages(logger)
-        snapshot['packages']['pip'] = _collect_pip_packages(logger)
-        snapshot['packages']['npm'] = _collect_npm_packages(logger)
-        snapshot['packages']['cargo'] = _collect_cargo_packages(logger)
-        snapshot['packages']['go'] = _collect_go_packages(logger)
+        snapshot["packages"]["apt"] = _collect_apt_packages(logger)
+        snapshot["packages"]["apt_repos"] = _collect_apt_repositories(logger)
+        snapshot["packages"]["snap"] = _collect_snap_packages(logger)
+        snapshot["packages"]["flatpak"] = _collect_flatpak_packages(logger)
+        snapshot["packages"]["pip"] = _collect_pip_packages(logger)
+        snapshot["packages"]["npm"] = _collect_npm_packages(logger)
+        snapshot["packages"]["cargo"] = _collect_cargo_packages(logger)
+        snapshot["packages"]["go"] = _collect_go_packages(logger)
 
         # Configs
-        snapshot['configs']['dotfiles'] = _collect_dotfiles(logger)
-        snapshot['configs']['cron'] = _collect_cron_jobs(logger)
-        snapshot['configs']['systemd_user'] = _collect_systemd_user_services(logger)
-        snapshot['configs']['dconf'] = _collect_dconf_settings(logger)
-        snapshot['configs']['fstab'] = _collect_fstab(logger)
-        snapshot['configs']['hosts'] = _collect_hosts_file(logger)
-        snapshot['configs']['shell_history'] = _collect_shell_history(logger)
-        snapshot['configs']['fonts'] = _collect_fonts(logger)
-        snapshot['configs']['custom_bin'] = _collect_custom_bin(logger)
+        snapshot["configs"]["dotfiles"] = _collect_dotfiles(logger)
+        snapshot["configs"]["cron"] = _collect_cron_jobs(logger)
+        snapshot["configs"]["systemd_user"] = _collect_systemd_user_services(logger)
+        snapshot["configs"]["dconf"] = _collect_dconf_settings(logger)
+        snapshot["configs"]["fstab"] = _collect_fstab(logger)
+        snapshot["configs"]["hosts"] = _collect_hosts_file(logger)
+        snapshot["configs"]["shell_history"] = _collect_shell_history(logger)
+        snapshot["configs"]["fonts"] = _collect_fonts(logger)
+        snapshot["configs"]["custom_bin"] = _collect_custom_bin(logger)
 
         # Security
-        snapshot['security']['ssh_keys'] = _collect_ssh_keys_info(logger)
-        snapshot['security']['gpg_keys'] = _collect_gpg_keys(logger)
+        snapshot["security"]["ssh_keys"] = _collect_ssh_keys_info(logger)
+        snapshot["security"]["gpg_keys"] = _collect_gpg_keys(logger)
 
         # Network
-        snapshot['network']['connections'] = _collect_network_connections(logger)
-        snapshot['network']['wireguard'] = _collect_wireguard_configs(logger)
+        snapshot["network"]["connections"] = _collect_network_connections(logger)
+        snapshot["network"]["wireguard"] = _collect_wireguard_configs(logger)
 
         # Apps
-        snapshot['apps']['vscode_extensions'] = _collect_vscode_extensions(logger)
-        snapshot['apps']['vscode_settings'] = _collect_vscode_settings(logger)
-        snapshot['apps']['sublime'] = _collect_sublime_settings(logger)
-        snapshot['apps']['browsers'] = _collect_browser_profiles(logger)
-        snapshot['apps']['docker'] = _collect_docker_info(logger)
+        snapshot["apps"]["vscode_extensions"] = _collect_vscode_extensions(logger)
+        snapshot["apps"]["vscode_settings"] = _collect_vscode_settings(logger)
+        snapshot["apps"]["sublime"] = _collect_sublime_settings(logger)
+        snapshot["apps"]["browsers"] = _collect_browser_profiles(logger)
+        snapshot["apps"]["docker"] = _collect_docker_info(logger)
 
     elif _is_windows():
         # Packages
-        snapshot['packages']['winget'] = _collect_winget_packages(logger)
-        snapshot['packages']['choco'] = _collect_choco_packages(logger)
-        snapshot['packages']['pip'] = _collect_pip_packages(logger)
-        snapshot['packages']['npm'] = _collect_npm_packages(logger)
-        snapshot['packages']['cargo'] = _collect_cargo_packages(logger)
+        snapshot["packages"]["winget"] = _collect_winget_packages(logger)
+        snapshot["packages"]["choco"] = _collect_choco_packages(logger)
+        snapshot["packages"]["pip"] = _collect_pip_packages(logger)
+        snapshot["packages"]["npm"] = _collect_npm_packages(logger)
+        snapshot["packages"]["cargo"] = _collect_cargo_packages(logger)
 
         # Configs
-        snapshot['configs']['env_vars'] = _collect_windows_env_vars(logger)
-        snapshot['configs']['dotfiles'] = _collect_dotfiles(logger)
-        snapshot['configs']['scheduled_tasks'] = _collect_windows_scheduled_tasks(logger)
+        snapshot["configs"]["env_vars"] = _collect_windows_env_vars(logger)
+        snapshot["configs"]["dotfiles"] = _collect_dotfiles(logger)
+        snapshot["configs"]["scheduled_tasks"] = _collect_windows_scheduled_tasks(logger)
 
         # Security
-        snapshot['security']['ssh_keys'] = _collect_ssh_keys_info(logger)
+        snapshot["security"]["ssh_keys"] = _collect_ssh_keys_info(logger)
 
         # Apps
-        snapshot['apps']['vscode_extensions'] = _collect_vscode_extensions(logger)
-        snapshot['apps']['vscode_settings'] = _collect_vscode_settings(logger)
-        snapshot['apps']['wsl'] = _collect_wsl_distros(logger)
-        snapshot['apps']['docker'] = _collect_docker_info(logger)
+        snapshot["apps"]["vscode_extensions"] = _collect_vscode_extensions(logger)
+        snapshot["apps"]["vscode_settings"] = _collect_vscode_settings(logger)
+        snapshot["apps"]["wsl"] = _collect_wsl_distros(logger)
+        snapshot["apps"]["docker"] = _collect_docker_info(logger)
 
     # Determine output path
     if output_file:
         out_path = Path(output_file)
     elif output_dir:
-        out_path = Path(output_dir) / f'snapshot_{hostname}_{timestamp}.json'
+        out_path = Path(output_dir) / f"snapshot_{hostname}_{timestamp}.json"
     else:
-        out_path = Path.cwd() / f'snapshot_{hostname}_{timestamp}.json'
+        out_path = Path.cwd() / f"snapshot_{hostname}_{timestamp}.json"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False))
@@ -815,6 +868,7 @@ def create_snapshot(logger, output_dir=None, output_file=None):
 
 
 # ─── Restore Script Generation ──────────────────────────────────────────────
+
 
 def generate_restore_script(logger, snapshot_path, output_path=None):
     """
@@ -837,12 +891,12 @@ def generate_restore_script(logger, snapshot_path, output_path=None):
         return None
 
     snapshot = json.loads(snapshot_path.read_text())
-    metadata = snapshot.get('metadata', {})
-    os_type = metadata.get('os', platform.system())
+    metadata = snapshot.get("metadata", {})
+    os_type = metadata.get("os", platform.system())
 
-    if os_type == 'Linux':
+    if os_type == "Linux":
         return _generate_linux_restore(logger, snapshot, output_path)
-    elif os_type == 'Windows':
+    elif os_type == "Windows":
         return _generate_windows_restore(logger, snapshot, output_path)
     else:
         logger.error(f"Unsupported OS type in snapshot: {os_type}")
@@ -851,275 +905,281 @@ def generate_restore_script(logger, snapshot_path, output_path=None):
 
 def _generate_linux_restore(logger, snapshot, output_path=None):
     """Generate a bash restore script for Linux/Ubuntu."""
-    metadata = snapshot['metadata']
-    timestamp = metadata.get('timestamp', datetime.now().strftime('%Y%m%d_%H%M%S'))
-    hostname = metadata.get('hostname', 'unknown')
+    metadata = snapshot["metadata"]
+    timestamp = metadata.get("timestamp", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    hostname = metadata.get("hostname", "unknown")
 
     if output_path is None:
-        output_path = Path.cwd() / f'restore_{hostname}_{timestamp}.sh'
+        output_path = Path.cwd() / f"restore_{hostname}_{timestamp}.sh"
     output_path = Path(output_path)
 
-    packages = snapshot.get('packages', {})
-    configs = snapshot.get('configs', {})
-    apps = snapshot.get('apps', {})
-    security = snapshot.get('security', {})
+    packages = snapshot.get("packages", {})
+    configs = snapshot.get("configs", {})
+    apps = snapshot.get("apps", {})
+    security = snapshot.get("security", {})
 
     lines = [
-        '#!/usr/bin/env bash',
-        '# ═══════════════════════════════════════════════════════════════════',
-        f'# System Restore Script — Generated from snapshot {timestamp}',
-        f'# Original host: {hostname}',
-        f'# OS: {metadata.get("os_release", "unknown")}',
-        f'# Generated: {datetime.now().isoformat()}',
-        '# ═══════════════════════════════════════════════════════════════════',
-        '#',
-        '# IMPORTANT: Review this script before running!',
-        '# Some sections may need manual adjustments for your new system.',
-        '# Sections are independent — comment out what you don\'t need.',
-        '#',
-        '# Usage: chmod +x restore.sh && sudo ./restore.sh',
-        '# ═══════════════════════════════════════════════════════════════════',
-        '',
-        'set -euo pipefail',
-        '',
-        '# Colors for output',
+        "#!/usr/bin/env bash",
+        "# ═══════════════════════════════════════════════════════════════════",
+        f"# System Restore Script — Generated from snapshot {timestamp}",
+        f"# Original host: {hostname}",
+        f"# OS: {metadata.get('os_release', 'unknown')}",
+        f"# Generated: {datetime.now().isoformat()}",
+        "# ═══════════════════════════════════════════════════════════════════",
+        "#",
+        "# IMPORTANT: Review this script before running!",
+        "# Some sections may need manual adjustments for your new system.",
+        "# Sections are independent — comment out what you don't need.",
+        "#",
+        "# Usage: chmod +x restore.sh && sudo ./restore.sh",
+        "# ═══════════════════════════════════════════════════════════════════",
+        "",
+        "set -euo pipefail",
+        "",
+        "# Colors for output",
         'GREEN="\\033[0;32m"',
         'YELLOW="\\033[1;33m"',
         'RED="\\033[0;31m"',
         'NC="\\033[0m"',
-        '',
+        "",
         'log() { echo -e "${GREEN}[RESTORE]${NC} $1"; }',
         'warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }',
         'err() { echo -e "${RED}[ERROR]${NC} $1"; }',
-        '',
+        "",
         f'ORIGINAL_USER="{metadata.get("user", "")}"',
         f'ORIGINAL_HOME="{metadata.get("home", "")}"',
-        '',
-        '# Detect current user (script runs as root, restore to actual user)',
+        "",
+        "# Detect current user (script runs as root, restore to actual user)",
         'if [ -n "${SUDO_USER:-}" ]; then',
         '    TARGET_USER="$SUDO_USER"',
         '    TARGET_HOME=$(eval echo "~$SUDO_USER")',
-        'else',
+        "else",
         '    TARGET_USER="$(whoami)"',
         '    TARGET_HOME="$HOME"',
-        'fi',
-        '',
-        'run_as_user() {',
+        "fi",
+        "",
+        "run_as_user() {",
         '    if [ "$(whoami)" = "root" ] && [ -n "${SUDO_USER:-}" ]; then',
         '        sudo -u "$TARGET_USER" "$@"',
-        '    else',
+        "    else",
         '        "$@"',
-        '    fi',
-        '}',
-        '',
+        "    fi",
+        "}",
+        "",
     ]
 
     # ── Phase 1: APT repositories ──
-    apt_repos = packages.get('apt_repos', {})
-    sources = apt_repos.get('sources', [])
+    apt_repos = packages.get("apt_repos", {})
+    sources = apt_repos.get("sources", [])
     if sources:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 1: APT Repositories')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 1: APT Repositories")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Restoring APT repositories..."')
-        lines.append('')
+        lines.append("")
         for src in sources:
-            fname = src.get('file', '')
-            content = src.get('content', '')
+            fname = src.get("file", "")
+            content = src.get("content", "")
             if fname and content:
                 # Escape content for heredoc
-                lines.append(f'cat > /etc/apt/sources.list.d/{fname} << \'REPOEOF\'')
+                lines.append(f"cat > /etc/apt/sources.list.d/{fname} << 'REPOEOF'")
                 lines.append(content)
-                lines.append('REPOEOF')
-                lines.append('')
-        lines.append('apt-get update')
-        lines.append('')
+                lines.append("REPOEOF")
+                lines.append("")
+        lines.append("apt-get update")
+        lines.append("")
 
     # ── Phase 2: APT packages ──
-    apt_pkgs = packages.get('apt', [])
+    apt_pkgs = packages.get("apt", [])
     if apt_pkgs:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 2: APT Packages')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 2: APT Packages")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append(f'log "Installing {len(apt_pkgs)} APT packages..."')
         # Chunk into groups of 20 for readability
         for i in range(0, len(apt_pkgs), 20):
-            chunk = apt_pkgs[i:i+20]
-            lines.append(f'apt-get install -y {" ".join(chunk)} || warn "Some APT packages failed to install"')
-        lines.append('')
+            chunk = apt_pkgs[i : i + 20]
+            lines.append(
+                f'apt-get install -y {" ".join(chunk)} || warn "Some APT packages failed to install"'
+            )
+        lines.append("")
 
     # ── Phase 3: Snap packages ──
-    snap_pkgs = packages.get('snap', [])
+    snap_pkgs = packages.get("snap", [])
     if snap_pkgs:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 3: Snap Packages')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 3: Snap Packages")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append(f'log "Installing {len(snap_pkgs)} Snap packages..."')
         for pkg in snap_pkgs:
-            name = pkg['name'] if isinstance(pkg, dict) else pkg
-            classic = pkg.get('classic', False) if isinstance(pkg, dict) else False
-            classic_flag = ' --classic' if classic else ''
+            name = pkg["name"] if isinstance(pkg, dict) else pkg
+            classic = pkg.get("classic", False) if isinstance(pkg, dict) else False
+            classic_flag = " --classic" if classic else ""
             lines.append(f'snap install {name}{classic_flag} || warn "Failed to install snap: {name}"')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 4: Flatpak packages ──
-    flatpak_pkgs = packages.get('flatpak', [])
+    flatpak_pkgs = packages.get("flatpak", [])
     if flatpak_pkgs:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 4: Flatpak Packages')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 4: Flatpak Packages")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Installing Flatpak packages..."')
-        lines.append('flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo')
+        lines.append(
+            "flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo"
+        )
         for pkg in flatpak_pkgs:
-            app_id = pkg['app_id'] if isinstance(pkg, dict) else pkg
+            app_id = pkg["app_id"] if isinstance(pkg, dict) else pkg
             lines.append(f'flatpak install -y flathub {app_id} || warn "Failed to install flatpak: {app_id}"')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 5: Pip/pipx packages ──
-    pip_data = packages.get('pip', {})
-    pipx_pkgs = pip_data.get('pipx', []) if isinstance(pip_data, dict) else []
-    pip_user_pkgs = pip_data.get('pip_user', []) if isinstance(pip_data, dict) else []
+    pip_data = packages.get("pip", {})
+    pipx_pkgs = pip_data.get("pipx", []) if isinstance(pip_data, dict) else []
+    pip_user_pkgs = pip_data.get("pip_user", []) if isinstance(pip_data, dict) else []
     if pipx_pkgs or pip_user_pkgs:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 5: Python Packages')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 5: Python Packages")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         if pipx_pkgs:
             lines.append(f'log "Installing {len(pipx_pkgs)} pipx packages..."')
-            lines.append('run_as_user pipx ensurepath 2>/dev/null || true')
+            lines.append("run_as_user pipx ensurepath 2>/dev/null || true")
             for pkg in pipx_pkgs:
                 lines.append(f'run_as_user pipx install {pkg} || warn "Failed to install pipx: {pkg}"')
         if pip_user_pkgs:
             lines.append(f'log "Installing {len(pip_user_pkgs)} pip user packages..."')
             for pkg in pip_user_pkgs:
                 lines.append(f'run_as_user pip install --user {pkg} || warn "Failed to install pip: {pkg}"')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 6: npm global packages ──
-    npm_pkgs = packages.get('npm', [])
+    npm_pkgs = packages.get("npm", [])
     if npm_pkgs:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 6: npm Global Packages')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 6: npm Global Packages")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append(f'log "Installing {len(npm_pkgs)} npm global packages..."')
         lines.append(f'npm install -g {" ".join(npm_pkgs)} || warn "Some npm packages failed"')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 7: Cargo packages ──
-    cargo_pkgs = packages.get('cargo', [])
+    cargo_pkgs = packages.get("cargo", [])
     if cargo_pkgs:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 7: Cargo Packages')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 7: Cargo Packages")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Installing Cargo packages..."')
-        lines.append('if ! command -v cargo &>/dev/null; then')
-        lines.append('    run_as_user bash -c "curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"')
-        lines.append('fi')
+        lines.append("if ! command -v cargo &>/dev/null; then")
+        lines.append(
+            '    run_as_user bash -c "curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"'
+        )
+        lines.append("fi")
         for pkg in cargo_pkgs:
-            name = pkg['name'] if isinstance(pkg, dict) else pkg
+            name = pkg["name"] if isinstance(pkg, dict) else pkg
             lines.append(f'run_as_user cargo install {name} || warn "Failed to install cargo: {name}"')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 8: VS Code extensions ──
-    vscode_exts = apps.get('vscode_extensions', [])
+    vscode_exts = apps.get("vscode_extensions", [])
     if vscode_exts:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 8: VS Code Extensions')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 8: VS Code Extensions")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append(f'log "Installing {len(vscode_exts)} VS Code extensions..."')
-        lines.append('if command -v code &>/dev/null; then')
+        lines.append("if command -v code &>/dev/null; then")
         for ext in vscode_exts:
-            lines.append(f'    run_as_user code --install-extension {ext} --force || true')
-        lines.append('else')
+            lines.append(f"    run_as_user code --install-extension {ext} --force || true")
+        lines.append("else")
         lines.append('    warn "VS Code not found — install it first, then re-run this section"')
-        lines.append('fi')
-        lines.append('')
+        lines.append("fi")
+        lines.append("")
 
     # ── Phase 9: VS Code settings ──
-    vscode_settings = apps.get('vscode_settings')
+    vscode_settings = apps.get("vscode_settings")
     if vscode_settings:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 9: VS Code Settings')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 9: VS Code Settings")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Restoring VS Code settings..."')
         lines.append('VSCODE_DIR="$TARGET_HOME/.config/Code/User"')
         lines.append('mkdir -p "$VSCODE_DIR"')
         encoded = base64.b64encode(vscode_settings.encode()).decode()
         lines.append(f'echo "{encoded}" | base64 -d > "$VSCODE_DIR/settings.json"')
         lines.append('chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/Code" 2>/dev/null || true')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 10: Dotfiles ──
-    dotfiles = configs.get('dotfiles', {})
+    dotfiles = configs.get("dotfiles", {})
     if dotfiles:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 10: Dotfiles')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 10: Dotfiles")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append(f'log "Restoring {len(dotfiles)} dotfiles..."')
         for rel_path, content in dotfiles.items():
-            full_path = f'$TARGET_HOME/{rel_path}'
+            full_path = f"$TARGET_HOME/{rel_path}"
             dir_path = str(Path(rel_path).parent)
-            if dir_path != '.':
+            if dir_path != ".":
                 lines.append(f'mkdir -p "$TARGET_HOME/{dir_path}"')
             encoded = base64.b64encode(content.encode()).decode()
             lines.append(f'echo "{encoded}" | base64 -d > "{full_path}"')
             lines.append(f'chown "$TARGET_USER:$TARGET_USER" "{full_path}"')
-            lines.append('')
+            lines.append("")
 
     # ── Phase 11: Cron jobs ──
-    cron_content = configs.get('cron')
+    cron_content = configs.get("cron")
     if cron_content:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 11: Cron Jobs')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 11: Cron Jobs")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Restoring cron jobs..."')
         encoded = base64.b64encode(cron_content.encode()).decode()
         lines.append(f'echo "{encoded}" | base64 -d | run_as_user crontab -')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 12: dconf/GNOME settings ──
-    dconf_dump = configs.get('dconf')
+    dconf_dump = configs.get("dconf")
     if dconf_dump:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 12: GNOME/Desktop Settings')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 12: GNOME/Desktop Settings")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Restoring GNOME/dconf settings..."')
-        lines.append('if command -v dconf &>/dev/null; then')
+        lines.append("if command -v dconf &>/dev/null; then")
         encoded = base64.b64encode(dconf_dump.encode()).decode()
         lines.append(f'    echo "{encoded}" | base64 -d | run_as_user dconf load /')
-        lines.append('fi')
-        lines.append('')
+        lines.append("fi")
+        lines.append("")
 
     # ── Phase 13: fstab ──
-    fstab = configs.get('fstab')
+    fstab = configs.get("fstab")
     if fstab:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 13: /etc/fstab (REVIEW BEFORE APPLYING)')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 13: /etc/fstab (REVIEW BEFORE APPLYING)")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Original /etc/fstab saved for reference..."')
-        lines.append('cat << \'FSTABEOF\' > /tmp/original_fstab.txt')
+        lines.append("cat << 'FSTABEOF' > /tmp/original_fstab.txt")
         lines.append(fstab)
-        lines.append('FSTABEOF')
+        lines.append("FSTABEOF")
         lines.append('warn "Original fstab saved to /tmp/original_fstab.txt — review and merge manually"')
-        lines.append('')
+        lines.append("")
 
     # ── Phase 14: /etc/hosts ──
-    hosts = configs.get('hosts')
+    hosts = configs.get("hosts")
     if hosts:
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
-        lines.append('# Phase 14: /etc/hosts Custom Entries')
-        lines.append('# ═══════════════════════════════════════════════════════════════════')
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
+        lines.append("# Phase 14: /etc/hosts Custom Entries")
+        lines.append("# ═══════════════════════════════════════════════════════════════════")
         lines.append('log "Appending custom host entries..."')
-        lines.append('cat >> /etc/hosts << \'HOSTSEOF\'')
-        lines.append('')
-        lines.append('# --- Restored from snapshot ---')
+        lines.append("cat >> /etc/hosts << 'HOSTSEOF'")
+        lines.append("")
+        lines.append("# --- Restored from snapshot ---")
         lines.append(hosts)
-        lines.append('HOSTSEOF')
-        lines.append('')
+        lines.append("HOSTSEOF")
+        lines.append("")
 
     # ── Reminders ──
-    lines.append('# ═══════════════════════════════════════════════════════════════════')
-    lines.append('# Manual Steps Required')
-    lines.append('# ═══════════════════════════════════════════════════════════════════')
+    lines.append("# ═══════════════════════════════════════════════════════════════════")
+    lines.append("# Manual Steps Required")
+    lines.append("# ═══════════════════════════════════════════════════════════════════")
     lines.append('echo ""')
     lines.append('log "═══════════════════════════════════════════════════════════"')
     lines.append('log "Automated restore complete!"')
@@ -1127,39 +1187,41 @@ def _generate_linux_restore(logger, snapshot, output_path=None):
     lines.append('echo ""')
     lines.append('warn "Manual steps still needed:"')
 
-    ssh_keys = security.get('ssh_keys', [])
+    ssh_keys = security.get("ssh_keys", [])
     if ssh_keys:
         lines.append(f'warn "  - SSH keys: Restore {len(ssh_keys)} key(s) manually from backup"')
         for key in ssh_keys:
             lines.append(f'warn "      {key.get("name", "unknown")} ({key.get("type", "")})"')
 
-    gpg_keys = security.get('gpg_keys', [])
+    gpg_keys = security.get("gpg_keys", [])
     if gpg_keys:
         lines.append(f'warn "  - GPG keys: Import {len(gpg_keys)} key(s) from backup"')
 
-    wg = snapshot.get('network', {}).get('wireguard', [])
+    wg = snapshot.get("network", {}).get("wireguard", [])
     if wg:
         lines.append(f'warn "  - WireGuard: Restore {len(wg)} config(s): {", ".join(wg)}"')
 
-    nm_conns = snapshot.get('network', {}).get('connections', [])
-    wifi_conns = [c for c in nm_conns if c.get('has_wifi_psk')]
+    nm_conns = snapshot.get("network", {}).get("connections", [])
+    wifi_conns = [c for c in nm_conns if c.get("has_wifi_psk")]
     if wifi_conns:
         lines.append(f'warn "  - WiFi: Re-enter passwords for {len(wifi_conns)} network(s)"')
 
-    browsers = apps.get('browsers', {})
+    browsers = apps.get("browsers", {})
     if browsers:
-        lines.append(f'warn "  - Browser profiles: Copy profiles from backup for: {", ".join(browsers.keys())}"')
+        lines.append(
+            f'warn "  - Browser profiles: Copy profiles from backup for: {", ".join(browsers.keys())}"'
+        )
 
     if fstab:
         lines.append('warn "  - /etc/fstab: Review /tmp/original_fstab.txt and merge"')
 
     lines.append('echo ""')
     lines.append('log "Done!"')
-    lines.append('')
+    lines.append("")
 
     # Write script
     output_path = Path(output_path)
-    output_path.write_text('\n'.join(lines))
+    output_path.write_text("\n".join(lines))
     output_path.chmod(0o755)
 
     logger.info(f"Restore script generated: {output_path}")
@@ -1168,110 +1230,117 @@ def _generate_linux_restore(logger, snapshot, output_path=None):
 
 def _generate_windows_restore(logger, snapshot, output_path=None):
     """Generate a PowerShell restore script for Windows."""
-    metadata = snapshot['metadata']
-    timestamp = metadata.get('timestamp', datetime.now().strftime('%Y%m%d_%H%M%S'))
-    hostname = metadata.get('hostname', 'unknown')
+    metadata = snapshot["metadata"]
+    timestamp = metadata.get("timestamp", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    hostname = metadata.get("hostname", "unknown")
 
     if output_path is None:
-        output_path = Path.cwd() / f'restore_{hostname}_{timestamp}.ps1'
+        output_path = Path.cwd() / f"restore_{hostname}_{timestamp}.ps1"
     output_path = Path(output_path)
 
-    packages = snapshot.get('packages', {})
-    configs = snapshot.get('configs', {})
-    apps = snapshot.get('apps', {})
+    packages = snapshot.get("packages", {})
+    configs = snapshot.get("configs", {})
+    apps = snapshot.get("apps", {})
 
     lines = [
-        '# ═══════════════════════════════════════════════════════════════════',
-        f'# System Restore Script — Generated from snapshot {timestamp}',
-        f'# Original host: {hostname}',
-        f'# OS: {metadata.get("os_release", "unknown")}',
-        f'# Generated: {datetime.now().isoformat()}',
-        '# ═══════════════════════════════════════════════════════════════════',
-        '#',
-        '# IMPORTANT: Review this script before running!',
-        '# Run as Administrator: Set-ExecutionPolicy Bypass -Scope Process',
-        '# ═══════════════════════════════════════════════════════════════════',
-        '',
+        "# ═══════════════════════════════════════════════════════════════════",
+        f"# System Restore Script — Generated from snapshot {timestamp}",
+        f"# Original host: {hostname}",
+        f"# OS: {metadata.get('os_release', 'unknown')}",
+        f"# Generated: {datetime.now().isoformat()}",
+        "# ═══════════════════════════════════════════════════════════════════",
+        "#",
+        "# IMPORTANT: Review this script before running!",
+        "# Run as Administrator: Set-ExecutionPolicy Bypass -Scope Process",
+        "# ═══════════════════════════════════════════════════════════════════",
+        "",
         '$ErrorActionPreference = "Continue"',
-        '',
+        "",
         'function Log($msg) { Write-Host "[RESTORE] $msg" -ForegroundColor Green }',
         'function Warn($msg) { Write-Host "[WARNING] $msg" -ForegroundColor Yellow }',
-        '',
+        "",
     ]
 
     # Winget packages
-    winget_pkgs = packages.get('winget', [])
+    winget_pkgs = packages.get("winget", [])
     if winget_pkgs:
-        lines.append('# ═══ Winget Packages ═══')
+        lines.append("# ═══ Winget Packages ═══")
         lines.append(f'Log "Installing {len(winget_pkgs)} winget packages..."')
         for pkg in winget_pkgs:
-            lines.append(f'winget install --id "{pkg}" --accept-package-agreements --accept-source-agreements 2>$null')
-        lines.append('')
+            lines.append(
+                f'winget install --id "{pkg}" --accept-package-agreements --accept-source-agreements 2>$null'
+            )
+        lines.append("")
 
     # Chocolatey packages
-    choco_pkgs = packages.get('choco', [])
+    choco_pkgs = packages.get("choco", [])
     if choco_pkgs:
-        lines.append('# ═══ Chocolatey Packages ═══')
+        lines.append("# ═══ Chocolatey Packages ═══")
         lines.append('Log "Installing Chocolatey packages..."')
-        lines.append('if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {')
+        lines.append("if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {")
         lines.append('    Log "Installing Chocolatey..."')
-        lines.append('    Set-ExecutionPolicy Bypass -Scope Process -Force')
-        lines.append('    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072')
-        lines.append('    iex ((New-Object System.Net.WebClient).DownloadString("https://community.chocolatey.org/install.ps1"))')
-        lines.append('}')
+        lines.append("    Set-ExecutionPolicy Bypass -Scope Process -Force")
+        lines.append(
+            "    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072"
+        )
+        lines.append(
+            '    iex ((New-Object System.Net.WebClient).DownloadString("https://community.chocolatey.org/install.ps1"))'
+        )
+        lines.append("}")
         for pkg in choco_pkgs:
-            name = pkg['name'] if isinstance(pkg, dict) else pkg
-            lines.append(f'choco install {name} -y 2>$null')
-        lines.append('')
+            name = pkg["name"] if isinstance(pkg, dict) else pkg
+            lines.append(f"choco install {name} -y 2>$null")
+        lines.append("")
 
     # npm packages
-    npm_pkgs = packages.get('npm', [])
+    npm_pkgs = packages.get("npm", [])
     if npm_pkgs:
-        lines.append('# ═══ npm Global Packages ═══')
+        lines.append("# ═══ npm Global Packages ═══")
         lines.append(f'Log "Installing {len(npm_pkgs)} npm global packages..."')
-        lines.append(f'npm install -g {" ".join(npm_pkgs)} 2>$null')
-        lines.append('')
+        lines.append(f"npm install -g {' '.join(npm_pkgs)} 2>$null")
+        lines.append("")
 
     # VS Code extensions
-    vscode_exts = apps.get('vscode_extensions', [])
+    vscode_exts = apps.get("vscode_extensions", [])
     if vscode_exts:
-        lines.append('# ═══ VS Code Extensions ═══')
+        lines.append("# ═══ VS Code Extensions ═══")
         lines.append(f'Log "Installing {len(vscode_exts)} VS Code extensions..."')
-        lines.append('if (Get-Command code -ErrorAction SilentlyContinue) {')
+        lines.append("if (Get-Command code -ErrorAction SilentlyContinue) {")
         for ext in vscode_exts:
-            lines.append(f'    code --install-extension {ext} --force 2>$null')
+            lines.append(f"    code --install-extension {ext} --force 2>$null")
         lines.append('} else { Warn "VS Code not found - install it first" }')
-        lines.append('')
+        lines.append("")
 
     # Env vars
-    env_vars = configs.get('env_vars', {})
+    env_vars = configs.get("env_vars", {})
     if env_vars:
-        lines.append('# ═══ Environment Variables ═══')
+        lines.append("# ═══ Environment Variables ═══")
         lines.append('Log "Restoring user environment variables..."')
         for key, value in env_vars.items():
-            if key.upper() not in ('PATH', 'TEMP', 'TMP', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'):
+            if key.upper() not in ("PATH", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
                 lines.append(f'[Environment]::SetEnvironmentVariable("{key}", "{value}", "User")')
-        lines.append('')
+        lines.append("")
 
     # WSL
-    wsl_distros = apps.get('wsl', [])
+    wsl_distros = apps.get("wsl", [])
     if wsl_distros:
-        lines.append('# ═══ WSL Distributions ═══')
+        lines.append("# ═══ WSL Distributions ═══")
         lines.append('Warn "Previously installed WSL distros:"')
         for distro in wsl_distros:
             lines.append(f'Warn "  - {distro}"')
         lines.append('Warn "Install manually: wsl --install -d <distro>"')
-        lines.append('')
+        lines.append("")
 
     lines.append('Log "Restore complete!"')
-    lines.append('')
+    lines.append("")
 
-    output_path.write_text('\n'.join(lines))
+    output_path.write_text("\n".join(lines))
     logger.info(f"Restore script generated: {output_path}")
     return str(output_path)
 
 
 # ─── Snapshot Diff ──────────────────────────────────────────────────────────
+
 
 def diff_snapshots(logger, snapshot_a_path, snapshot_b_path):
     """
@@ -1291,33 +1360,35 @@ def diff_snapshots(logger, snapshot_a_path, snapshot_b_path):
     diff = {}
 
     # Compare package lists
-    for category in ('apt', 'snap', 'npm', 'go', 'winget'):
-        pkgs_a = set(_extract_names(a.get('packages', {}).get(category, [])))
-        pkgs_b = set(_extract_names(b.get('packages', {}).get(category, [])))
+    for category in ("apt", "snap", "npm", "go", "winget"):
+        pkgs_a = set(_extract_names(a.get("packages", {}).get(category, [])))
+        pkgs_b = set(_extract_names(b.get("packages", {}).get(category, [])))
         added = sorted(pkgs_b - pkgs_a)
         removed = sorted(pkgs_a - pkgs_b)
         if added or removed:
-            diff[category] = {'added': added, 'removed': removed}
+            diff[category] = {"added": added, "removed": removed}
 
     # Cargo
-    cargo_a = set(p['name'] for p in a.get('packages', {}).get('cargo', []) if isinstance(p, dict))
-    cargo_b = set(p['name'] for p in b.get('packages', {}).get('cargo', []) if isinstance(p, dict))
+    cargo_a = {p["name"] for p in a.get("packages", {}).get("cargo", []) if isinstance(p, dict)}
+    cargo_b = {p["name"] for p in b.get("packages", {}).get("cargo", []) if isinstance(p, dict)}
     if cargo_a != cargo_b:
-        diff['cargo'] = {'added': sorted(cargo_b - cargo_a), 'removed': sorted(cargo_a - cargo_b)}
+        diff["cargo"] = {"added": sorted(cargo_b - cargo_a), "removed": sorted(cargo_a - cargo_b)}
 
     # VS Code extensions
-    ext_a = set(a.get('apps', {}).get('vscode_extensions', []))
-    ext_b = set(b.get('apps', {}).get('vscode_extensions', []))
+    ext_a = set(a.get("apps", {}).get("vscode_extensions", []))
+    ext_b = set(b.get("apps", {}).get("vscode_extensions", []))
     if ext_a != ext_b:
-        diff['vscode_extensions'] = {'added': sorted(ext_b - ext_a), 'removed': sorted(ext_a - ext_b)}
+        diff["vscode_extensions"] = {"added": sorted(ext_b - ext_a), "removed": sorted(ext_a - ext_b)}
 
     # Dotfiles
-    dot_a = set(a.get('configs', {}).get('dotfiles', {}).keys())
-    dot_b = set(b.get('configs', {}).get('dotfiles', {}).keys())
+    dot_a = set(a.get("configs", {}).get("dotfiles", {}).keys())
+    dot_b = set(b.get("configs", {}).get("dotfiles", {}).keys())
     if dot_a != dot_b:
-        diff['dotfiles'] = {'added': sorted(dot_b - dot_a), 'removed': sorted(dot_a - dot_b)}
+        diff["dotfiles"] = {"added": sorted(dot_b - dot_a), "removed": sorted(dot_a - dot_b)}
 
-    logger.info(f"Snapshot diff: {sum(len(v.get('added', [])) + len(v.get('removed', [])) for v in diff.values())} changes across {len(diff)} categories")
+    logger.info(
+        f"Snapshot diff: {sum(len(v.get('added', [])) + len(v.get('removed', [])) for v in diff.values())} changes across {len(diff)} categories"
+    )
     return diff
 
 
@@ -1328,5 +1399,5 @@ def _extract_names(items):
         if isinstance(item, str):
             names.append(item)
         elif isinstance(item, dict):
-            names.append(item.get('name', item.get('app_id', '')))
+            names.append(item.get("name", item.get("app_id", "")))
     return names

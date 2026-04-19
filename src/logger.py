@@ -4,7 +4,7 @@ logger.py - Structured Application Logging
 Provides the :class:`AppLogger` façade used throughout the backup pipeline.
 Supports three output streams:
 
-  1. Rotating file handler — 50 MB × 30 files (human-readable or JSON).
+  1. Rotating file handler — 50 MB x 30 files (human-readable or JSON).
   2. Console handler — always human-readable.
   3. Audit file handler — security- and compliance-relevant events only,
      written to a separate ``audit.log`` at INFO level.
@@ -28,7 +28,7 @@ import uuid
 from contextvars import ContextVar
 from logging import handlers
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _AUDIT_EVENTS = frozenset(
     {
@@ -106,7 +106,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def _truthy(value: Optional[str]) -> bool:
+def _truthy(value: str | None) -> bool:
     return str(value or "").lower() in {"1", "true", "yes", "on"}
 
 
@@ -128,7 +128,7 @@ class AppLogger:
         self,
         log_file: str | os.PathLike[str],
         log_level: int = logging.INFO,
-        audit_file: Optional[str | os.PathLike[str]] = None,
+        audit_file: str | os.PathLike[str] | None = None,
     ) -> None:
         self.logger = self._setup(Path(log_file), log_level, audit_file)
 
@@ -136,7 +136,7 @@ class AppLogger:
         self,
         log_file: Path,
         log_level: int,
-        audit_file: Optional[str | os.PathLike[str]],
+        audit_file: str | os.PathLike[str] | None,
     ) -> logging.Logger:
         logger = logging.getLogger("backup_handler")
         logger.setLevel(log_level)

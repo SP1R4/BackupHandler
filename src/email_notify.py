@@ -7,20 +7,21 @@ for transient connection failures while avoiding retries on permanent errors
 such as authentication failures.
 """
 
+import contextlib
 import smtplib
-from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 
 def _build_html_body(subject, body):
     """Build a styled HTML version of the notification email."""
     # Determine status color based on content
-    if 'failed' in body.lower() or 'error' in body.lower():
-        status_color = '#dc3545'
-    elif 'completed' in body.lower() or 'success' in body.lower():
-        status_color = '#28a745'
+    if "failed" in body.lower() or "error" in body.lower():
+        status_color = "#dc3545"
+    elif "completed" in body.lower() or "success" in body.lower():
+        status_color = "#28a745"
     else:
-        status_color = '#007bff'
+        status_color = "#007bff"
 
     return f"""\
 <html>
@@ -40,8 +41,19 @@ def _build_html_body(subject, body):
 </html>"""
 
 
-def send_smtp_email(logger, smtp_host, smtp_port, smtp_user, smtp_password,
-                    from_addr, to_addrs, subject, body, use_tls=True, html=True):
+def send_smtp_email(
+    logger,
+    smtp_host,
+    smtp_port,
+    smtp_user,
+    smtp_password,
+    from_addr,
+    to_addrs,
+    subject,
+    body,
+    use_tls=True,
+    html=True,
+):
     """
     Send an email notification via SMTP.
 
@@ -66,14 +78,14 @@ def send_smtp_email(logger, smtp_host, smtp_port, smtp_user, smtp_password,
         return False
 
     # Build the MIME message with both plain text and HTML
-    msg = MIMEMultipart('alternative')
-    msg['From'] = from_addr
-    msg['To'] = ', '.join(to_addrs)
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
+    msg = MIMEMultipart("alternative")
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_addrs)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
     if html:
         html_body = _build_html_body(subject, body)
-        msg.attach(MIMEText(html_body, 'html'))
+        msg.attach(MIMEText(html_body, "html"))
 
     # Retry loop — handles transient network failures (up to 3 attempts)
     retries = 3
@@ -94,18 +106,14 @@ def send_smtp_email(logger, smtp_host, smtp_port, smtp_user, smtp_password,
             # Authentication errors are permanent — do not retry
             logger.error(f"SMTP authentication failed: {e}")
             if server:
-                try:
+                with contextlib.suppress(Exception):
                     server.quit()
-                except Exception:
-                    pass
             return False
         except Exception as e:
             # Close the connection to prevent socket leaks before retrying
             if server:
-                try:
+                with contextlib.suppress(Exception):
                     server.quit()
-                except Exception:
-                    pass
             logger.warning(f"SMTP send attempt {attempt}/{retries} failed: {e}")
             if attempt == retries:
                 logger.error(f"Failed to send SMTP email after {retries} attempts: {e}")

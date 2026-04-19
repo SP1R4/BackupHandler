@@ -7,8 +7,8 @@ scheduling options. Validates mutually exclusive flags and argument
 dependencies after parsing.
 """
 
-import sys
 import argparse
+import sys
 
 from src.__version__ import __version__
 from src.utils import is_valid_email
@@ -28,208 +28,173 @@ def setup_argparse():
     )
 
     # Version
-    parser.add_argument(
-        '--version',
-        action='version',
-        version=f'backup-handler {__version__}'
-    )
+    parser.add_argument("--version", action="version", version=f"backup-handler {__version__}")
 
     # Configuration file argument
     config_group = parser.add_mutually_exclusive_group()
     config_group.add_argument(
-        '--config',
-        type=str,
-        default=None,
-        help='Path to the configuration file (default: config/config.ini)'
+        "--config", type=str, default=None, help="Path to the configuration file (default: config/config.ini)"
     )
     config_group.add_argument(
-        '--profile',
+        "--profile",
         type=str,
         default=None,
-        help='Load config profile by name (resolves to config/config.NAME.ini)'
+        help="Load config profile by name (resolves to config/config.NAME.ini)",
     )
 
     # Operation Modes Selection
     parser.add_argument(
-        '--operation-modes',
-        nargs='+',
-        choices=['local', 'ssh', 's3', 'db'],
-        default=['local'],
-        help='Select operation modes to run (default: local). Choices: local, ssh, s3, db'
+        "--operation-modes",
+        nargs="+",
+        choices=["local", "ssh", "s3", "db"],
+        default=["local"],
+        help="Select operation modes to run (default: local). Choices: local, ssh, s3, db",
     )
 
     # Directory and server overrides
+    parser.add_argument("--source-dir", type=str, help="Override the source directory from the configuration")
     parser.add_argument(
-        '--source-dir',
-        type=str,
-        help='Override the source directory from the configuration'
+        "--backup-dirs", nargs="+", help="Override the backup directories (space-separated list)"
     )
     parser.add_argument(
-        '--backup-dirs',
-        nargs='+',
-        help='Override the backup directories (space-separated list)'
-    )
-    parser.add_argument(
-        '--ssh-servers',
-        nargs='+',
-        help='Override the SSH servers for remote backups (space-separated list)'
+        "--ssh-servers", nargs="+", help="Override the SSH servers for remote backups (space-separated list)"
     )
 
     # Backup behavior options
     parser.add_argument(
-        '--backup-mode',
+        "--backup-mode",
         type=str,
-        choices=['full', 'incremental', 'differential'],
-        help='Specify the type of backup. Choices: full, incremental, differential'
+        choices=["full", "incremental", "differential"],
+        help="Specify the type of backup. Choices: full, incremental, differential",
     )
     parser.add_argument(
-        '--show-setup',
-        action='store_true',
-        help='Display the current backup configuration and settings'
+        "--show-setup", action="store_true", help="Display the current backup configuration and settings"
     )
 
     # Compression options
     parser.add_argument(
-        '--compress',
+        "--compress",
         type=str,
-        choices=['zip', 'zip_pw'],
-        help="Compress the source directory. Choices: 'zip' (normal zip), 'zip_pw' (password-protected zip)"
+        choices=["zip", "zip_pw"],
+        help="Compress the source directory. Choices: 'zip' (normal zip), 'zip_pw' (password-protected zip)",
     )
 
     # Scheduling options
-    parser.add_argument(
-        '--scheduled',
-        action='store_true',
-        help='Execute the backup as a scheduled task'
-    )
+    parser.add_argument("--scheduled", action="store_true", help="Execute the backup as a scheduled task")
 
     # Dry run option
     parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Show what would be done without actually copying or syncing any files'
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without actually copying or syncing any files",
     )
 
     # Exclude patterns
     parser.add_argument(
-        '--exclude',
+        "--exclude",
         type=str,
         default=None,
-        help='Comma-separated glob patterns to exclude (e.g., "*.log,*.tmp,__pycache__/*"). Overrides config.'
+        help='Comma-separated glob patterns to exclude (e.g., "*.log,*.tmp,__pycache__/*"). Overrides config.',
     )
 
     # Status command
     parser.add_argument(
-        '--status',
-        action='store_true',
-        help='Display backup status: last backup times, directory sizes, and latest manifest summary'
+        "--status",
+        action="store_true",
+        help="Display backup status: last backup times, directory sizes, and latest manifest summary",
     )
 
     # Retention policy override
     parser.add_argument(
-        '--retain',
+        "--retain",
         type=int,
         default=None,
-        help='Override max_count retention policy: keep only N most recent backups per directory'
+        help="Override max_count retention policy: keep only N most recent backups per directory",
     )
 
     # Restore options
     parser.add_argument(
-        '--restore',
-        action='store_true',
-        help='Restore files from a backup directory or archive'
+        "--restore", action="store_true", help="Restore files from a backup directory or archive"
     )
     parser.add_argument(
-        '--from-dir',
-        type=str,
-        default=None,
-        help='Source backup directory or ZIP archive to restore from'
+        "--from-dir", type=str, default=None, help="Source backup directory or ZIP archive to restore from"
     )
+    parser.add_argument("--to-dir", type=str, default=None, help="Destination directory to restore files to")
     parser.add_argument(
-        '--to-dir',
+        "--restore-timestamp",
         type=str,
         default=None,
-        help='Destination directory to restore files to'
-    )
-    parser.add_argument(
-        '--restore-timestamp',
-        type=str,
-        default=None,
-        help='Restore to a specific point in time (YYYYMMDD_HHMMSS format, uses manifests)'
+        help="Restore to a specific point in time (YYYYMMDD_HHMMSS format, uses manifests)",
     )
 
     # Verify backup integrity
     parser.add_argument(
-        '--verify',
-        action='store_true',
-        help='Verify backup integrity by checking files against the latest manifest checksums'
+        "--verify",
+        action="store_true",
+        help="Verify backup integrity by checking files against the latest manifest checksums",
     )
 
     # Deduplication option
     parser.add_argument(
-        '--dedup',
-        action='store_true',
-        help='Enable file-level deduplication using hardlinks for identical files across backups'
+        "--dedup",
+        action="store_true",
+        help="Enable file-level deduplication using hardlinks for identical files across backups",
     )
 
     # Encryption option
     parser.add_argument(
-        '--encrypt',
-        action='store_true',
-        help='Encrypt backup files at rest using AES-256-GCM (overrides config [ENCRYPTION] enabled)'
+        "--encrypt",
+        action="store_true",
+        help="Encrypt backup files at rest using AES-256-GCM (overrides config [ENCRYPTION] enabled)",
     )
 
     # Snapshot options
     parser.add_argument(
-        '--snapshot',
-        action='store_true',
-        help='Create a system state snapshot (packages, configs, apps) for restore after format'
+        "--snapshot",
+        action="store_true",
+        help="Create a system state snapshot (packages, configs, apps) for restore after format",
     )
     parser.add_argument(
-        '--restore-snapshot',
+        "--restore-snapshot",
         type=str,
         default=None,
-        metavar='SNAPSHOT_FILE',
-        help='Generate a restore script from a snapshot JSON file'
+        metavar="SNAPSHOT_FILE",
+        help="Generate a restore script from a snapshot JSON file",
     )
     parser.add_argument(
-        '--snapshot-output',
+        "--snapshot-output",
         type=str,
         default=None,
-        metavar='PATH',
-        help='Output directory or file path for snapshot/restore script'
+        metavar="PATH",
+        help="Output directory or file path for snapshot/restore script",
     )
     parser.add_argument(
-        '--snapshot-diff',
+        "--snapshot-diff",
         nargs=2,
-        metavar=('OLD', 'NEW'),
+        metavar=("OLD", "NEW"),
         default=None,
-        help='Compare two snapshot files and show what changed'
+        help="Compare two snapshot files and show what changed",
     )
 
     # Tailscale options
     parser.add_argument(
-        '--tailscale',
-        action='store_true',
-        help='Enable Tailscale VPN for SSH backups (connects using pre-auth key before SSH sync)'
+        "--tailscale",
+        action="store_true",
+        help="Enable Tailscale VPN for SSH backups (connects using pre-auth key before SSH sync)",
     )
     parser.add_argument(
-        '--tailscale-authkey',
+        "--tailscale-authkey",
         type=str,
         default=None,
-        help='Tailscale pre-auth key (overrides config [TAILSCALE] auth_key)'
+        help="Tailscale pre-auth key (overrides config [TAILSCALE] auth_key)",
     )
 
     # Notifications option
     parser.add_argument(
-        '--notifications',
-        action='store_true',
-        help='Enable notifications for backup operations'
+        "--notifications", action="store_true", help="Enable notifications for backup operations"
     )
     parser.add_argument(
-        '--receiver',
-        nargs='+',
-        help='List of email addresses to receive notifications (space-separated)'
+        "--receiver", nargs="+", help="List of email addresses to receive notifications (space-separated)"
     )
 
     # Parse the arguments
@@ -241,6 +206,7 @@ def setup_argparse():
         sys.exit(1)
 
     return args
+
 
 def validate_args(args, logger):
     """
@@ -255,8 +221,10 @@ def validate_args(args, logger):
     """
     # --scheduled and --dry-run don't make sense together
     if args.scheduled and args.dry_run:
-        logger.error("--scheduled and --dry-run cannot be used together. "
-                      "Dry-run is for one-off previews, not scheduled execution.")
+        logger.error(
+            "--scheduled and --dry-run cannot be used together. "
+            "Dry-run is for one-off previews, not scheduled execution."
+        )
         sys.exit(1)
 
     # Check if --backup-mode is specified without source and backup directories
@@ -292,5 +260,7 @@ def validate_args(args, logger):
         sys.exit(1)
 
     # Warn if both local and ssh modes are selected
-    if 'local' in args.operation_modes and 'ssh' in args.operation_modes:
-        logger.warning("Both 'local' and 'ssh' operation modes selected. Ensure that both are intended to run concurrently.")
+    if "local" in args.operation_modes and "ssh" in args.operation_modes:
+        logger.warning(
+            "Both 'local' and 'ssh' operation modes selected. Ensure that both are intended to run concurrently."
+        )

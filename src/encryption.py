@@ -14,18 +14,19 @@ When a key file is used, the salt field is zeroed out (unused on decrypt).
 """
 
 import os
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
+from pathlib import Path
+
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
+from tqdm import tqdm
 
 # ─── Cryptographic constants ────────────────────────────────────────────────
-PBKDF2_ITERATIONS = 600_000   # OWASP-recommended minimum for HMAC-SHA256
-SALT_SIZE = 16                # 128-bit random salt per file
-NONCE_SIZE = 12               # 96-bit nonce (standard for AES-GCM)
-KEY_SIZE = 32                 # 256-bit AES key
+PBKDF2_ITERATIONS = 600_000  # OWASP-recommended minimum for HMAC-SHA256
+SALT_SIZE = 16  # 128-bit random salt per file
+NONCE_SIZE = 12  # 96-bit nonce (standard for AES-GCM)
+KEY_SIZE = 32  # 256-bit AES key
 
 
 def derive_key(passphrase, salt):
@@ -36,7 +37,7 @@ def derive_key(passphrase, salt):
         salt=salt,
         iterations=PBKDF2_ITERATIONS,
     )
-    return kdf.derive(passphrase.encode('utf-8'))
+    return kdf.derive(passphrase.encode("utf-8"))
 
 
 def load_key_file(path):
@@ -92,7 +93,7 @@ def encrypt_file(path, passphrase=None, key_file=None):
 
     key, salt = get_encryption_key(passphrase=passphrase, key_file=key_file)
     if salt is None:
-        salt = b'\x00' * SALT_SIZE  # Placeholder when using key file
+        salt = b"\x00" * SALT_SIZE  # Placeholder when using key file
 
     # Generate a unique nonce for this file (never reuse with the same key)
     nonce = os.urandom(NONCE_SIZE)
@@ -100,7 +101,7 @@ def encrypt_file(path, passphrase=None, key_file=None):
     ciphertext = aesgcm.encrypt(nonce, plaintext, None)
 
     # Write encrypted output and remove plaintext original
-    enc_path = path.with_name(path.name + '.enc')
+    enc_path = path.with_name(path.name + ".enc")
     enc_path.write_bytes(salt + nonce + ciphertext)
     path.unlink()
     return enc_path
@@ -131,22 +132,19 @@ def decrypt_file(enc_path, passphrase=None, key_file=None):
 
     # Parse the binary header: [salt][nonce][ciphertext+tag]
     salt = data[:SALT_SIZE]
-    nonce = data[SALT_SIZE:SALT_SIZE + NONCE_SIZE]
-    ciphertext = data[SALT_SIZE + NONCE_SIZE:]
+    nonce = data[SALT_SIZE : SALT_SIZE + NONCE_SIZE]
+    ciphertext = data[SALT_SIZE + NONCE_SIZE :]
 
-    if key_file:
-        key = load_key_file(key_file)
-    else:
-        key = derive_key(passphrase, salt)
+    key = load_key_file(key_file) if key_file else derive_key(passphrase, salt)
 
     aesgcm = AESGCM(key)
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
 
     # Restore the original filename by stripping the .enc suffix
-    if enc_path.name.endswith('.enc'):
+    if enc_path.name.endswith(".enc"):
         out_path = enc_path.with_name(enc_path.name[:-4])
     else:
-        out_path = enc_path.with_suffix('')
+        out_path = enc_path.with_suffix("")
 
     out_path.write_bytes(plaintext)
     enc_path.unlink()
@@ -171,9 +169,13 @@ def encrypt_directory(directory, passphrase=None, key_file=None, logger=None, wo
         int: Number of files successfully encrypted.
     """
     directory = Path(directory)
-    files = [f for f in directory.rglob('*')
-             if f.is_file() and f.suffix != '.enc'
-             and not (f.name.startswith('backup_manifest_') and f.suffix == '.json')]
+    files = [
+        f
+        for f in directory.rglob("*")
+        if f.is_file()
+        and f.suffix != ".enc"
+        and not (f.name.startswith("backup_manifest_") and f.suffix == ".json")
+    ]
 
     if not files:
         return 0
@@ -198,8 +200,9 @@ def encrypt_directory(directory, passphrase=None, key_file=None, logger=None, wo
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(_encrypt_one, f): f for f in files}
-            for future in tqdm(as_completed(futures), total=len(futures),
-                               desc="Encrypting files", unit="files"):
+            for future in tqdm(
+                as_completed(futures), total=len(futures), desc="Encrypting files", unit="files"
+            ):
                 file = futures[future]
                 try:
                     future.result()
@@ -230,7 +233,7 @@ def decrypt_directory(directory, passphrase=None, key_file=None, logger=None, wo
         int: Number of files successfully decrypted.
     """
     directory = Path(directory)
-    files = [f for f in directory.rglob('*.enc') if f.is_file()]
+    files = [f for f in directory.rglob("*.enc") if f.is_file()]
 
     if not files:
         return 0
@@ -255,8 +258,9 @@ def decrypt_directory(directory, passphrase=None, key_file=None, logger=None, wo
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(_decrypt_one, f): f for f in files}
-            for future in tqdm(as_completed(futures), total=len(futures),
-                               desc="Decrypting files", unit="files"):
+            for future in tqdm(
+                as_completed(futures), total=len(futures), desc="Decrypting files", unit="files"
+            ):
                 file = futures[future]
                 try:
                     future.result()
