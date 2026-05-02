@@ -38,8 +38,7 @@ def print_banner():
     ┌───────────────────────────────────────────────────────────────┐
     │                        Social Links                           │
     ├───────────────────────────────────────────────────────────────┤
-    │  GitHub: https://github.com/SP1R4                             │
-    │  X (Twitter): https://twitter.com/_SP1R4                      │
+    │  Find me here: https://sp1r4.github.io                        │
     └───────────────────────────────────────────────────────────────┘
     {Style.RESET_ALL}"""
     
