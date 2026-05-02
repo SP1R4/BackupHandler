@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/version-2.5.0-orange?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.6.0--dev-orange?style=for-the-badge" alt="Version">
 </p>
 
 <h1 align="center">Backup Handler</h1>
@@ -28,7 +28,8 @@
 - [Encryption at Rest](#encryption-at-rest)
 - [Deduplication](#deduplication)
 - [Tailscale VPN Integration](#tailscale-vpn-integration)
-- [Pre-flight Checks](#pre-flight-checks)
+- [Pre-flight Self-Heal](#pre-flight-self-heal)
+- [One-Shot System Install (`--install`)](#one-shot-system-install---install)
 - [System Snapshot & Restore](#system-snapshot--restore)
 - [Backup Verification](#backup-verification)
 - [Restore](#restore)
@@ -83,7 +84,8 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Symlink Support** | Symbolic links preserved as links during backup (not dereferenced) |
 | **System Snapshots** | Capture full system state (packages, configs, apps, keys) and generate restore scripts for OS rebuild |
 | **Snapshot Diff** | Compare two snapshots to see what packages, extensions, or configs changed over time |
-| **Pre-flight Checks** | Verifies backup destination mount points are accessible before starting, with notifications on failure |
+| **Pre-flight Self-Heal** | Verifies destination mountpoint AND the backing device's LABEL/UUID before every backup; auto-mounts the volume via `sudo -n mount`, appends a missing fstab entry, ensures writability, and emits a JSON status sentinel + local-MTA mail on fatal failure (DNS-independent alerting). Includes a staleness alert when the last successful run exceeds `staleness_factor x interval` |
+| **One-Shot Installer** | `--install` performs every OS-level prerequisite (mount, fstab with auto-revert, sudoers via visudo, postfix+bsd-mailx, smoke test) in a single privileged invocation. `--install --dry-run` prints the exact plan |
 | **Instance Locking** | PID lock file prevents duplicate scheduled instances |
 | **Startup Service** | Cross-platform service installation (systemd, launchd, Task Scheduler) |
 | **Integrity** | SHA-256 checksum verification on every copied file, recorded in manifest for later validation |
@@ -508,6 +510,7 @@ python main.py --profile production --operation-modes local --backup-mode full \
 | `--restore-snapshot FILE` | Generate a restore script from a snapshot JSON file |
 | `--snapshot-output PATH` | Output directory or file path for snapshot/restore script |
 | `--snapshot-diff OLD NEW` | Compare two snapshots and show added/removed items |
+| `--install` | One-shot privileged bootstrap (mount, fstab, sudoers, MTA, smoke test). Combine with `--dry-run` to preview |
 | `--tailscale` | Enable Tailscale VPN for SSH backups (connects using pre-auth key) |
 | `--tailscale-authkey KEY` | Tailscale pre-auth key (overrides config `[TAILSCALE] auth_key`) |
 | `--scheduled` | Run in scheduled mode using config times |
@@ -655,15 +658,113 @@ Generate pre-auth keys at [Tailscale Admin Console](https://login.tailscale.com/
 
 ---
 
-## Pre-flight Checks
+## Pre-flight Self-Heal
 
-Before any backup operation starts, Backup Handler verifies that all backup destinations are accessible:
+The pre-flight stage is the answer to a real production incident: on
+2026-04-16 a backup target's external disk got unmounted, the kernel
+exposed the mountpoint as a regular root-owned directory on the system
+disk, the script crashed in a pre-logger code path, Telegram failed
+because DNS was down, and **16 days of cron firings produced zero
+backups and zero alerts**. Every defense we had assumed at least one
+channel would still work; in that incident none did.
 
-- **Mount point detection**: For paths under `/mnt/` (e.g., `/mnt/data/backups`), checks that the mount point is actually mounted using `os.path.ismount()`
-- **Directory creation**: If the mount is available but the backup directory doesn't exist, it's created automatically
-- **Failure notification**: If destinations are inaccessible, the backup aborts immediately with a clear error and sends notifications (Telegram, SMTP, webhook) so you know right away
+The redesigned pre-flight runs before every backup and assumes nothing.
+It is configured under `[PREFLIGHT]` in `config/config.ini`:
 
-This prevents the common scenario where an external disk becomes unmounted and backups silently fail for days.
+```ini
+[PREFLIGHT]
+enabled = True
+expected_mount = /mnt/data
+expected_label = DATA                                # XFS / ext4 LABEL
+expected_uuid = 5a719803-02d0-4834-81af-8175d1ec5ef1
+expected_fs_type = xfs
+expected_owner = sp1r4-r
+auto_mount = True
+auto_fix_ownership = False                           # safer default
+ensure_fstab = True
+staleness_factor = 2.0                               # x interval_minutes
+local_mail_to = root                                 # DNS-independent alerts
+```
+
+What runs, in order:
+
+1. **Logger first.** `AppLogger` is initialized before `print_banner`,
+   `setup_argparse`, or any filesystem operation, so a crash in any
+   pre-flight step is *always* logged.
+2. **Mountpoint identity.** `os.path.ismount` proves a real mount.
+   `findmnt` + `blkid` confirm the source device matches
+   `expected_label` / `expected_uuid`. A wrong-volume mount is **fatal**
+   — pre-flight refuses to write a backup onto an impostor disk.
+3. **Auto-mount.** When the mount is missing and `auto_mount = True`,
+   pre-flight tries (in order) `sudo -n mount <mountpoint>`,
+   `sudo -n mount UUID=…`, `sudo -n mount LABEL=…`. Each `sudo` call is
+   non-interactive (`-n`) and relies on the `NOPASSWD` rule the
+   installer drops in `/etc/sudoers.d/backup-handler`.
+4. **fstab maintenance.** With `ensure_fstab = True`, a missing
+   `UUID=…` entry is appended with `nofail,x-systemd.device-timeout=30`,
+   so the disk being absent never blocks boot.
+5. **Writability probe.** A 4-byte file is created and unlinked under
+   the destination root. Mode/ownership mismatches that would surface
+   later as a 5,000-line wave of `Permission denied` errors are caught
+   here.
+6. **JSON status sentinel.** Every run writes
+   `Logs/last_run_status.json` atomically (tmp + rename) at three
+   points: `started` / `success` / `failure`. The sentinel survives
+   even when log rotation drops old `application.log.N` files, and is
+   the source of truth for staleness checks.
+7. **DNS-independent alerting.** On fatal failure pre-flight pipes a
+   short summary to `mail(1)` (or `sendmail`), addressed to
+   `local_mail_to`. The local MTA queues it on the host and delivers
+   when the network returns — no Telegram, no SMTP, no DNS required.
+8. **Staleness check.** If the last sentinel timestamp is older than
+   `staleness_factor x interval_minutes`, a non-fatal `STALE` alert is
+   emitted via every available channel — even if today's run succeeds,
+   you'll still hear that yesterday's didn't.
+
+**Exit codes** propagate the pre-flight outcome to systemd / cron /
+Prometheus: `0` success, `1` config error, `2` pre-flight failure
+(mount, identity, writability), `3` one or more backup modes failed.
+
+The full triage flow lives in [RUNBOOK.md §2.4](RUNBOOK.md).
+
+---
+
+## One-Shot System Install (`--install`)
+
+Standing up the pre-flight self-heal needs five OS-level prerequisites:
+the destination volume mounted and chowned, an fstab entry, a
+`NOPASSWD` sudoers rule for the mount commands, a local MTA, and a live
+smoke test that proves the chain works. Doing this by hand is exactly
+the kind of step that gets skipped — and a self-heal you forgot to
+provision is no self-heal at all.
+
+`--install` is a single privileged invocation that does all of it,
+idempotently:
+
+```bash
+sudo -E /path/to/venv/bin/python /path/to/main.py \
+    --config /path/to/config.ini --install
+
+# Preview without changing anything:
+sudo -E /path/to/venv/bin/python /path/to/main.py \
+    --config /path/to/config.ini --install --dry-run
+```
+
+What each step does:
+
+| Step | Action |
+|------|--------|
+| **mount** | Mounts `expected_mount` if not already mounted (UUID first, LABEL fallback) |
+| **destination** | Creates the backup tree under the mount and chowns it to `expected_owner` |
+| **fstab** | Appends a `nofail,x-systemd.device-timeout=30` entry by `UUID=`. Backs up `/etc/fstab` to a timestamped file first; if `mount -a` fails afterwards, the backup is restored automatically |
+| **sudoers** | Writes the rule into a `mkdtemp` staging file, validates with `visudo -cf`, and only then atomically moves it to `/etc/sudoers.d/backup-handler`. A broken sudoers file can lock you out of the machine — this path makes that impossible |
+| **mta** | `apt-get install postfix bsd-mailx` with `debconf-set-selections "Local only"`. `apt-get update` failures (e.g. one broken third-party repo) are logged as warnings, not fatals — the main archive cache is enough for both packages |
+| **smoke test** | Runs the full pre-flight pipeline against the live config and writes a `installer_smoke_test` sentinel |
+| **handover** | Chowns the project's `Logs/` and `BackupTimestamp/` back to the unprivileged owner so the next normal cron run can write through |
+
+The installer never touches `/etc/fstab` or `/etc/sudoers.d/` without
+both a backup and validation in place. Re-running it is safe: each step
+detects "already done" and returns `skipped`.
 
 ---
 
@@ -1067,7 +1168,10 @@ Logs are written to `Logs/application.log` with automatic rotation:
 | `Failed to bring Tailscale up` | Verify auth key is valid and not expired. Check `sudo tailscale up` works manually |
 | `Tailscale auth key missing` | Set `--tailscale-authkey` or `[TAILSCALE] auth_key` in config |
 | `Backup aborted: destination(s) inaccessible` | The backup disk is not mounted. Mount it and retry |
-| `Mount point /mnt/data is not mounted` | Mount the disk: `sudo mount /dev/sdX /mnt/data`. Consider adding to `/etc/fstab` |
+| `Mount point /mnt/data is not mounted` | Run `sudo … main.py --install` once — the installer will mount it, persist the entry to `/etc/fstab`, and add the `NOPASSWD` rule the pre-flight self-heal uses to auto-mount on subsequent runs |
+| Pre-flight reports wrong-volume / LABEL or UUID mismatch | A different disk is mounted at `expected_mount`. Pre-flight refuses to write — fix the underlying mount before retrying. **Do not** edit `expected_label`/`expected_uuid` to silence the alert; that's the tripwire working |
+| `Logs/last_run_status.json` shows `failure` and stale timestamp | Read the `error` field — it carries the pre-flight summary even when log rotation has dropped the original log line |
+| Installer's MTA step fails because `apt-get update` errored | Already non-fatal in the current build — `apt-get update` non-zero is a warning, only `apt-get install` failure aborts the step. Re-run `--install` once the broken third-party repo is fixed |
 
 ---
 

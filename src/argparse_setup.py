@@ -189,6 +189,18 @@ def setup_argparse():
         help="Tailscale pre-auth key (overrides config [TAILSCALE] auth_key)",
     )
 
+    # System bootstrap (one-shot, requires root)
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help=(
+            "One-shot system bootstrap: mount the destination volume, append a fstab "
+            "entry, install the sudoers rule for self-heal, install a local MTA. "
+            "Requires root (run via 'sudo'). Idempotent — safe to re-run. Combine with "
+            "--dry-run to preview changes without applying them."
+        ),
+    )
+
     # Notifications option
     parser.add_argument(
         "--notifications", action="store_true", help="Enable notifications for backup operations"
@@ -227,9 +239,14 @@ def validate_args(args, logger):
         )
         sys.exit(1)
 
-    # Check if --backup-mode is specified without source and backup directories
-    if args.backup_mode and (not args.source_dir or not args.backup_dirs):
-        logger.error("Source directory and backup directories must be specified when using --backup-mode.")
+    # Check if --backup-mode is specified without source and backup directories.
+    # When --config is provided the values can come from [DEFAULT] source_dir
+    # and [BACKUPS] backup_dirs, so defer the check to post-config-load in main.
+    if args.backup_mode and not args.config and (not args.source_dir or not args.backup_dirs):
+        logger.error(
+            "Source directory and backup directories must be specified when using --backup-mode "
+            "(either via --source-dir/--backup-dirs or via --config pointing at a config.ini that defines them)."
+        )
         sys.exit(1)
 
     # --restore requires --from-dir and --to-dir

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--install` (`src/installer.py`): one-shot system bootstrap that
+  performs every OS-level prerequisite the preflight self-heal needs.
+  Single privileged invocation (`sudo -E backup-handler --install`)
+  mounts the destination volume, creates and chowns the destination
+  tree, appends a hardened `nofail` entry to `/etc/fstab` (with a
+  timestamped backup + auto-revert if `mount -a` fails), drops a
+  visudo-validated `/etc/sudoers.d/backup-handler` with the minimum
+  NOPASSWD rules, installs `postfix` (Local only) + `bsd-mailx` if no
+  MTA is present, and runs a live preflight smoke test. Every step is
+  idempotent. `--install --dry-run` prints the exact plan and changes
+  nothing. Ownership of the project `Logs/` and `BackupTimestamp/` is
+  handed back to the unprivileged owner at the end so the next normal
+  cron run can write through.
+- Preflight self-check + self-heal (`src/preflight.py`, new
+  `[PREFLIGHT]` config section). Runs before every backup and detects
+  the silent-failure mode that produced 16 days of zero-backups in
+  April 2026: destination unmounted, falls back to a regular directory
+  on the system disk, script crashes before logging, no alert. Now:
+  verifies the destination is a real mountpoint AND the backing device
+  matches `expected_label`/`expected_uuid`; auto-mounts via
+  `sudo -n mount` when missing; appends a missing fstab entry with
+  `nofail`; ensures the destination tree is writable and (optionally)
+  chowns it. On fatal failure, writes a JSON status sentinel
+  (`Logs/last_run_status.json`) and dispatches a local-MTA mail
+  (`local_mail_to`) — both work even when DNS/Telegram are down.
+  Surfaces a non-fatal STALE alert when the last successful backup
+  exceeds `staleness_factor x interval`. Logger is now initialized
+  before any filesystem operation so pre-logger crashes are no longer
+  possible. RUNBOOK §2.4 + §4 cover triage and the required sudoers /
+  fstab / MTA setup.
 - Hardened systemd unit + timer pair in `contrib/systemd/`
   (`backup-handler.service` / `.timer`). Runs under an unprivileged
   `backup` user with `ProtectSystem=strict`, `MemoryDenyWriteExecute`,

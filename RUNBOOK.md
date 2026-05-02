@@ -237,7 +237,38 @@ sudo systemctl start backup-handler-drill.service
 journalctl -u backup-handler-drill.service -f
 ```
 
-### 2.4 Heartbeat ("dead-man's-switch") alert fired
+### 2.4 Preflight aborted with "destination is not a mountpoint" / "WRONG volume"
+
+Preflight is the self-check that runs before every backup. It is what
+turns the 2026-04-16 failure mode (16 days of silent zero-backups) into
+a one-line abort with an alert.
+
+**"is not a mountpoint and auto-mount failed"** — the destination disk
+is unmounted and the script could not remount it. Usual causes:
+1. The disk is genuinely unplugged or failed. Check `lsblk` and `dmesg`.
+2. The sudoers rule for `mount` is missing. Verify with:
+   ```
+   sudo -n -l | grep mount
+   ```
+   If empty, install the rule from §5 below.
+3. There is no fstab entry for the mountpoint. Either run with
+   `[PREFLIGHT] ensure_fstab = True` or add one manually:
+   ```
+   echo "LABEL=DATA /mnt/data xfs defaults,nofail,x-systemd.device-timeout=30 0 2" | sudo tee -a /etc/fstab
+   ```
+
+**"is mounted from the WRONG volume"** — `/mnt/data` is mounted but the
+device label/UUID does not match the expected value. This is fatal by
+design — refusing to write avoids corrupting the wrong disk. Check the
+expected value in `[PREFLIGHT]` and reconcile with `lsblk -o NAME,LABEL,UUID,MOUNTPOINTS`.
+
+**"STALE: last successful backup Nh ago"** — non-fatal warning surfaced
+by preflight at the start of every run. If the previous N runs failed
+silently (preflight off, sentinel writes blocked, alerts disabled),
+this is the next run that screams loudly and reaches `local_mail_to`
+even when DNS/Telegram are down.
+
+### 2.5 Heartbeat ("dead-man's-switch") alert fired
 
 If the external watchdog (healthchecks.io, Dead Man's Snitch, Uptime Kuma)
 pages about a missed ping, the host either never ran a backup or every run
@@ -281,7 +312,64 @@ network is partitioned before the run even starts.
 
 ---
 
-## 4. Safety rules
+## 4. Preflight self-heal: required system configuration
+
+Preflight self-heal needs explicit OS-level permissions. None of these
+are installed by default — the package ships them as templates for
+operators to review and apply.
+
+### 4.1 Sudoers rule (required for auto_mount + ensure_fstab)
+
+```
+# /etc/sudoers.d/backup-handler   (mode 0440, owner root:root)
+# Allow the backup user to mount the data volume and append a single
+# fstab line. NOPASSWD is required because cron has no terminal.
+backup-handler ALL=(root) NOPASSWD: /usr/bin/mount /mnt/data
+backup-handler ALL=(root) NOPASSWD: /usr/bin/mount LABEL=DATA /mnt/data
+backup-handler ALL=(root) NOPASSWD: /usr/bin/mount UUID=* /mnt/data
+backup-handler ALL=(root) NOPASSWD: /usr/bin/tee -a /etc/fstab
+```
+
+Validate before saving with `visudo -cf /etc/sudoers.d/backup-handler`.
+If the file is malformed `sudo` itself stops working — never edit it
+without `visudo`.
+
+### 4.2 fstab entry (required so the disk comes back on reboot)
+
+```
+LABEL=DATA  /mnt/data  xfs  defaults,nofail,x-systemd.device-timeout=30  0  2
+```
+
+The `nofail` option is non-negotiable — without it, an unhealthy data
+disk blocks boot and you lose remote access. With it, the system comes
+up degraded, preflight detects the missing volume, and the alert fires.
+
+### 4.3 Local MTA (required for `local_mail_to` fallback)
+
+```
+sudo apt install -y bsd-mailx postfix     # postfix in "Local only" mode
+echo "test" | mail -s "preflight test" root
+```
+
+`local_mail_to = root` works because postfix delivers `root@localhost`
+without a single DNS query. This is the channel that survives the
+exact failure mode that broke us in April: api.telegram.org unreachable.
+
+### 4.4 Verifying the chain end-to-end
+
+```
+sudo umount /mnt/data
+backup-handler --dry-run
+# expect: "Preflight: mounted /mnt/data via: sudo -n mount LABEL=DATA /mnt/data"
+mountpoint /mnt/data && echo "OK, healed"
+```
+
+If the dry run aborts with exit code 2, the sudoers / fstab / MTA chain
+is misconfigured — fix it before relying on the next scheduled run.
+
+---
+
+## 5. Safety rules
 
 1. **Never restore on top of a live production path.** Always restore to a
    scratch directory and copy in.

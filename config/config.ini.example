@@ -164,6 +164,69 @@ url = None
 # OPTIONAL: Ping request timeout in seconds. Default 10.
 timeout = 10
 
+[PREFLIGHT]
+# Self-check + self-heal that runs BEFORE any backup. Designed for the
+# silent-failure case where the destination disk gets unmounted, /mnt/X
+# falls back to an empty root-owned directory on the system disk, and
+# the script crashes before logging anything. With preflight enabled,
+# that scenario is detected, the disk is automatically remounted (if
+# sudoers allows), an alert is written even when Telegram/DNS are down,
+# and a sentinel file at status_sentinel records the outcome.
+
+# OPTIONAL: Master switch (True/False). Default: True.
+enabled = True
+
+# RECOMMENDED: The mount point that must be a real mountpoint before
+# we'll write a backup. Leave None to skip the mount check.
+expected_mount = /mnt/data
+
+# REQUIRED (one of label/uuid) when expected_mount is set: identity of
+# the volume that should be mounted there. If both are set, UUID wins.
+# Find the label with: lsblk -o NAME,LABEL or `blkid`.
+expected_label = DATA
+# Find the UUID with: lsblk -o NAME,UUID or `blkid -s UUID -o value /dev/sdb1`.
+expected_uuid = None
+
+# OPTIONAL: Filesystem type for fstab generation (e.g. xfs, ext4, btrfs).
+# Only used if ensure_fstab is True and we need to append a missing entry.
+expected_fs_type = xfs
+
+# OPTIONAL: Username that should own the destination tree. Required if
+# auto_fix_ownership is True.
+expected_owner = None
+
+# OPTIONAL: If True and the volume is not mounted, run
+# `sudo -n mount LABEL=...` to mount it. Requires a NOPASSWD sudoers
+# rule (see RUNBOOK §5). Default: True.
+auto_mount = True
+
+# OPTIONAL: If True and the destination is not writable, run
+# `sudo -n chown -R expected_owner:expected_owner DEST`. Off by default
+# because chown -R on a backup tree is heavy. Default: False.
+auto_fix_ownership = False
+
+# OPTIONAL: If True and /etc/fstab has no entry for expected_mount, append
+# one (UUID/LABEL preferred, with `nofail` so a missing disk does not
+# block boot). Requires sudoers rule. Default: True.
+ensure_fstab = True
+
+# OPTIONAL: Staleness threshold expressed as a multiplier of the schedule
+# interval. If the last successful backup is older than
+# staleness_factor x interval_minutes, log a non-fatal alert AND mail
+# local_mail_to (if set). Default: 2.0 — one missed run of grace.
+staleness_factor = 2.0
+
+# OPTIONAL: Local mail recipient for critical alerts that must reach
+# someone even when Telegram/DNS are down. Bare `root` or
+# `user@localhost` works because delivery uses the local MTA, no DNS.
+# Requires sendmail or mail(1) installed. Default: None.
+local_mail_to = root
+
+# OPTIONAL: Path (relative to project root) where the status sentinel
+# JSON is written. Monitoring agents alert if this file is missing,
+# stale, or status != "success". Default: Logs/last_run_status.json.
+status_sentinel = Logs/last_run_status.json
+
 [NOTIFICATIONS]
 # OPTIONAL: Enable Telegram bot notifications (True/False)
 bot = True

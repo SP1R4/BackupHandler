@@ -212,4 +212,5 @@ skips = [
     "B101",  # assert_used — fine in tests
     "B404",  # subprocess import — audited usage
     "B603",  # subprocess with list args — audited (no shell, fixed binaries)
+    "B607",  # partial executable path — intentional (sudo, mount, blkid, findmnt resolve via PATH)
 ]

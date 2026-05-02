@@ -35,10 +35,17 @@ from src.dedup import deduplicate_backup_dirs
 from src.email_notify import send_smtp_email
 from src.encryption import encrypt_directory
 from src.heartbeat import send_heartbeat
+from src.installer import run_installer
 
 # ─── Internal Module Imports ────────────────────────────────────────────────
-from src.logger import AppLogger
+from src.logger import AppLogger, current_run_id, new_run_id
 from src.manifest import BackupManifest, load_latest_manifest
+from src.preflight import (
+    PreflightConfig,
+    run_preflight,
+    send_local_mail,
+    write_status_sentinel,
+)
 from src.restore import restore_backup
 from src.retention import cleanup_old_backups
 from src.s3_sync import sync_to_s3
@@ -242,10 +249,15 @@ def show_status(logger, config_path):
 
 def main():
     """CLI entry point — parses arguments, routes to the appropriate operation."""
-    print_banner()
-
-    # Set up logging using AppLogger
+    # Initialize the logger BEFORE anything else (banner, argparse, filesystem).
+    # On 2026-04-16 the script crashed in a pre-logger code path and 16 days of
+    # cron firings produced zero log lines. Logger first, always.
     logger = AppLogger(LOG_PATH, logging.DEBUG).logger
+    new_run_id()
+    try:
+        print_banner()
+    except Exception as e:
+        logger.warning(f"Banner failed (non-fatal): {e}")
     args = setup_argparse()
 
     # Validate the parsed arguments
@@ -253,6 +265,18 @@ def main():
 
     # Resolve config path (--config, --profile, or default)
     config_path = _resolve_config_path(args)
+
+    # Handle --install early exit. Runs BEFORE AppLogger / banner write
+    # anything to disk because the installer is invoked via sudo and we
+    # do not want root-owned files left behind in the project tree.
+    if args.install:
+        try:
+            install_config = extract_config_values(logger, config_path, skip_validation=True)
+        except Exception as e:
+            logger.error(f"Cannot load config for installer: {e}")
+            sys.exit(1)
+        rc = run_installer(install_config, _PROJECT_ROOT, dry_run=args.dry_run)
+        sys.exit(rc)
 
     # Handle --status early exit
     if args.status:
@@ -397,10 +421,26 @@ def main():
             logger.error(f"Failed to load configuration file: {config_path}. Error: {e}")
             sys.exit(1)
     else:
+        # Fall back to config-defined source_dir / backup_dirs when CLI omits them.
+        # Lets cron lines pass --config and skip --source-dir / --backup-dirs.
+        cli_source_dir = args.source_dir
+        cli_backup_dirs = args.backup_dirs
+        if not cli_source_dir or not cli_backup_dirs:
+            try:
+                _cv = extract_config_values(logger, config_path, skip_validation=True)
+            except Exception:
+                _cv = {}
+            cli_source_dir = cli_source_dir or _cv.get("source_dir")
+            cli_backup_dirs = cli_backup_dirs or _cv.get("backup_dirs")
+        if args.backup_mode and (not cli_source_dir or not cli_backup_dirs):
+            logger.error(
+                "Source directory and backup directories must be specified when using --backup-mode."
+            )
+            sys.exit(1)
         rc = backup_operation(
             logger,
-            source_dir=args.source_dir,
-            backup_dirs=args.backup_dirs,
+            source_dir=cli_source_dir,
+            backup_dirs=cli_backup_dirs,
             ssh_servers=args.ssh_servers,
             operation_modes=args.operation_modes,
             backup_mode=args.backup_mode,
@@ -553,6 +593,32 @@ def scheduled_operation(logger, config_file, telegram_bot=None, exclude_patterns
 
 
 # ─── Notification Helpers ───────────────────────────────────────────────────
+
+
+def _critical_alert(
+    logger,
+    config_values,
+    telegram_bot,
+    notifications,
+    subject: str,
+    body: str,
+) -> None:
+    """
+    Emit a high-priority alert through every available channel.
+
+    Used for failures that MUST reach an operator: preflight aborts, stale
+    backups, lost destinations. Tries Telegram/SMTP/webhook (best-effort —
+    these can fail silently when DNS is broken, which is exactly the
+    scenario this guards), then always attempts a local-MTA mail to
+    [PREFLIGHT] local_mail_to. Local mail does not need DNS or external
+    network and survives the failure modes that disabled our other
+    channels on 2026-04-16.
+    """
+    _notify(logger, telegram_bot, notifications, f"{subject}: {body}", config_values=config_values)
+    if config_values:
+        local_to = config_values.get("preflight_local_mail_to")
+        if local_to:
+            send_local_mail(logger, local_to, f"[backup-handler] {subject}", body)
 
 
 def _notify(logger, telegram_bot, notifications, message, config_values=None):
@@ -739,17 +805,70 @@ def backup_operation(
     if exclude_patterns is None:
         exclude_patterns = config_values.get("exclude_patterns", [])
 
-    # Pre-flight: verify backup directories are accessible
-    if backup_dirs and not dry_run and not show_setup:
-        inaccessible = _check_backup_dirs_accessible(logger, backup_dirs)
-        if inaccessible:
-            msg = (
-                f"Backup aborted: destination(s) inaccessible: {', '.join(inaccessible)}. "
-                f"Check that the disk is mounted."
+    # ─── Preflight self-check + sentinel ───────────────────────────────────
+    # Resolve sentinel path (relative paths anchor at project root).
+    pf_cfg = PreflightConfig(
+        enabled=config_values.get("preflight_enabled", True),
+        expected_mount=config_values.get("preflight_expected_mount"),
+        expected_label=config_values.get("preflight_expected_label"),
+        expected_uuid=config_values.get("preflight_expected_uuid"),
+        expected_fs_type=config_values.get("preflight_expected_fs_type", "xfs"),
+        expected_owner=config_values.get("preflight_expected_owner"),
+        auto_mount=config_values.get("preflight_auto_mount", True),
+        auto_fix_ownership=config_values.get("preflight_auto_fix_ownership", False),
+        ensure_fstab=config_values.get("preflight_ensure_fstab", True),
+        staleness_factor=config_values.get("preflight_staleness_factor", 2.0),
+        local_mail_to=config_values.get("preflight_local_mail_to"),
+        status_sentinel=config_values.get("preflight_status_sentinel", "Logs/last_run_status.json"),
+    )
+    sentinel_relpath = Path(pf_cfg.status_sentinel)
+    sentinel_path = sentinel_relpath if sentinel_relpath.is_absolute() else _PROJECT_ROOT / sentinel_relpath
+
+    write_status_sentinel(
+        sentinel_path,
+        status="started",
+        run_id=current_run_id(),
+        message="backup run started",
+        extra={"backup_dirs": backup_dirs or [], "modes": operation_modes or []},
+    )
+
+    if not dry_run and not show_setup:
+        pf_result = run_preflight(
+            logger,
+            pf_cfg,
+            backup_dirs=backup_dirs or [],
+            interval_minutes=config_values.get("interval_minutes", 60),
+        )
+        if not pf_result.ok:
+            logger.error(f"Preflight FAILED: {pf_result.message}")
+            _critical_alert(
+                logger,
+                config_values,
+                telegram_bot,
+                notifications,
+                "Preflight FAILED",
+                pf_result.message,
             )
-            logger.error(msg)
-            _notify(logger, telegram_bot, notifications, msg, config_values=config_values)
+            write_status_sentinel(
+                sentinel_path,
+                status="failure",
+                run_id=current_run_id(),
+                message=f"preflight: {pf_result.message}",
+                extra={"phase": "preflight", "details": pf_result.details},
+            )
             return 2
+        if pf_result.healed:
+            logger.info(f"Preflight self-healed: {pf_result.message}")
+        stale_msg = pf_result.details.get("stale_alert") if pf_result.details else None
+        if stale_msg:
+            _critical_alert(
+                logger,
+                config_values,
+                telegram_bot,
+                notifications,
+                "Backup STALE",
+                stale_msg,
+            )
 
     # Hooks
     pre_hook = config_values.get("pre_backup_hook")
@@ -775,12 +894,20 @@ def backup_operation(
     # Run pre-backup hook
     if pre_hook and not run_hook(logger, pre_hook, "pre_backup"):
         logger.error("Pre-backup hook failed. Aborting backup.")
-        _notify(
+        _critical_alert(
             logger,
+            config_values,
             telegram_bot,
             notifications,
-            "Backup aborted: pre-backup hook failed.",
-            config_values=config_values,
+            "Backup aborted",
+            "pre-backup hook failed.",
+        )
+        write_status_sentinel(
+            sentinel_path,
+            status="failure",
+            run_id=current_run_id(),
+            message="pre-backup hook failed",
+            extra={"phase": "pre_hook"},
         )
         return 2
 
@@ -1139,12 +1266,20 @@ def backup_operation(
     if mode_failures:
         failed_str = ", ".join(mode_failures)
         logger.error(f"Backup run finished with failures in: {failed_str}")
-        _notify(
+        _critical_alert(
             logger,
+            config_values,
             telegram_bot,
             notifications,
-            f"Backup run finished with failures in: {failed_str}",
-            config_values=config_values,
+            "Backup partial failure",
+            f"failures in: {failed_str}",
+        )
+        write_status_sentinel(
+            sentinel_path,
+            status="failure",
+            run_id=current_run_id(),
+            message=f"failures in: {failed_str}",
+            extra={"phase": "modes", "failed_modes": mode_failures},
         )
         return 3
 
@@ -1165,6 +1300,13 @@ def backup_operation(
         except Exception as e:
             logger.error(f"Heartbeat dispatch failed (non-fatal): {e}")
 
+    write_status_sentinel(
+        sentinel_path,
+        status="success",
+        run_id=current_run_id(),
+        message="all modes completed",
+        extra={"modes": operation_modes or []},
+    )
     return 0
 
 

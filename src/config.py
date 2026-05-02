@@ -228,6 +228,27 @@ def extract_config_values(
         heartbeat_url = normalize_none(config.get("HEARTBEAT", "url", fallback=None))
         heartbeat_timeout = config.getint("HEARTBEAT", "timeout", fallback=10)
 
+        # Preflight self-check / self-heal — destination mount verification,
+        # ownership repair, fstab maintenance, status sentinel, local mail.
+        # See src/preflight.py and RUNBOOK §5 for the full contract.
+        preflight_enabled = config.getboolean("PREFLIGHT", "enabled", fallback=True)
+        preflight_expected_mount = normalize_none(config.get("PREFLIGHT", "expected_mount", fallback=None))
+        preflight_expected_label = normalize_none(config.get("PREFLIGHT", "expected_label", fallback=None))
+        preflight_expected_uuid = normalize_none(config.get("PREFLIGHT", "expected_uuid", fallback=None))
+        preflight_expected_fs_type = (
+            normalize_none(config.get("PREFLIGHT", "expected_fs_type", fallback="xfs")) or "xfs"
+        )
+        preflight_expected_owner = normalize_none(config.get("PREFLIGHT", "expected_owner", fallback=None))
+        preflight_auto_mount = config.getboolean("PREFLIGHT", "auto_mount", fallback=True)
+        preflight_auto_fix_ownership = config.getboolean("PREFLIGHT", "auto_fix_ownership", fallback=False)
+        preflight_ensure_fstab = config.getboolean("PREFLIGHT", "ensure_fstab", fallback=True)
+        preflight_staleness_factor = config.getfloat("PREFLIGHT", "staleness_factor", fallback=2.0)
+        preflight_local_mail_to = normalize_none(config.get("PREFLIGHT", "local_mail_to", fallback=None))
+        preflight_status_sentinel = (
+            normalize_none(config.get("PREFLIGHT", "status_sentinel", fallback="Logs/last_run_status.json"))
+            or "Logs/last_run_status.json"
+        )
+
         # Tailscale config
         tailscale_enabled = config.getboolean("TAILSCALE", "enabled", fallback=False)
         tailscale_auth_key = normalize_none(config.get("TAILSCALE", "auth_key", fallback=None))
@@ -300,6 +321,18 @@ def extract_config_values(
             "webhook_auth_header": webhook_auth_header,
             "heartbeat_url": heartbeat_url,
             "heartbeat_timeout": max(1, heartbeat_timeout),
+            "preflight_enabled": preflight_enabled,
+            "preflight_expected_mount": preflight_expected_mount,
+            "preflight_expected_label": preflight_expected_label,
+            "preflight_expected_uuid": preflight_expected_uuid,
+            "preflight_expected_fs_type": preflight_expected_fs_type,
+            "preflight_expected_owner": preflight_expected_owner,
+            "preflight_auto_mount": preflight_auto_mount,
+            "preflight_auto_fix_ownership": preflight_auto_fix_ownership,
+            "preflight_ensure_fstab": preflight_ensure_fstab,
+            "preflight_staleness_factor": max(1.0, preflight_staleness_factor),
+            "preflight_local_mail_to": preflight_local_mail_to,
+            "preflight_status_sentinel": preflight_status_sentinel,
             "tailscale_enabled": tailscale_enabled,
             "tailscale_auth_key": tailscale_auth_key,
             "tailscale_hostname": tailscale_hostname,
@@ -417,6 +450,20 @@ def extract_config_values(
             print("HEARTBEAT:")
             print(f"  URL          : {config_vars['heartbeat_url'] or 'Not Set'}")
             print(f"  Timeout (s)  : {config_vars['heartbeat_timeout']}\n")
+
+            print("PREFLIGHT:")
+            print(f"  Enabled            : {'Yes' if config_vars['preflight_enabled'] else 'No'}")
+            print(f"  Expected mount     : {config_vars['preflight_expected_mount'] or 'Not Set'}")
+            print(f"  Expected label     : {config_vars['preflight_expected_label'] or 'Not Set'}")
+            print(f"  Expected UUID      : {config_vars['preflight_expected_uuid'] or 'Not Set'}")
+            print(f"  Expected fs_type   : {config_vars['preflight_expected_fs_type']}")
+            print(f"  Expected owner     : {config_vars['preflight_expected_owner'] or 'Not Set'}")
+            print(f"  Auto mount         : {'Yes' if config_vars['preflight_auto_mount'] else 'No'}")
+            print(f"  Auto fix ownership : {'Yes' if config_vars['preflight_auto_fix_ownership'] else 'No'}")
+            print(f"  Ensure fstab       : {'Yes' if config_vars['preflight_ensure_fstab'] else 'No'}")
+            print(f"  Staleness factor   : {config_vars['preflight_staleness_factor']}x")
+            print(f"  Local mail to      : {config_vars['preflight_local_mail_to'] or 'Not Set'}")
+            print(f"  Status sentinel    : {config_vars['preflight_status_sentinel']}\n")
 
             print("NOTIFICATIONS:")
             print(f"  Bot             : {'Enabled' if config_vars['bot'] else 'Disabled'}")
