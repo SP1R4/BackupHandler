@@ -12,8 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-from src import installer
-from src.installer import (
+from backup_handler import installer
+from backup_handler.installer import (
     StepResult,
     run_installer,
     step_destination,
@@ -164,7 +164,7 @@ class TestStepSudoers:
 
     def test_idempotent_when_already_correct(self, logger, tmp_dir: Path):
         sudoers = tmp_dir / "backup-handler"
-        from src.installer import _render_sudoers
+        from backup_handler.installer import _render_sudoers
 
         sudoers.write_text(_render_sudoers("alice", "/mnt/data", "DATA", "abc"))
         with mock.patch.object(installer, "SUDOERS_PATH", str(sudoers)):

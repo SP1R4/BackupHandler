@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from src.utils import (
+from backup_handler.utils import (
     assert_config_safe_for_hooks,
     generate_otp,
     is_valid_email,

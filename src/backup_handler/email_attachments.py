@@ -8,7 +8,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 
 
-_EMAIL_CONFIG_PATH = Path(__file__).parent.parent / 'config' / 'email_config.ini'
+from ._paths import CONFIG_DIR
+
+_EMAIL_CONFIG_PATH = CONFIG_DIR / 'email_config.ini'
 
 # Cached email config with TTL (reloads after 5 minutes for long-running scheduled processes)
 _cached_email_config = None

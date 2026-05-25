@@ -7,8 +7,10 @@ from pathlib import Path as _Path
 from threading import Thread, Event
 
 
-CONFIG_FILE = str(_Path(__file__).parent.parent / 'config' / 'bot_config.ini')
-_RUNTIME_USERS_FILE = str(_Path(__file__).parent.parent / 'config' / '.bot_users.json')
+from .._paths import CONFIG_DIR
+
+CONFIG_FILE = str(CONFIG_DIR / 'bot_config.ini')
+_RUNTIME_USERS_FILE = str(CONFIG_DIR / '.bot_users.json')
 
 class TelegramBot:
     def __init__(self, logger):

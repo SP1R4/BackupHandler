@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest import mock
 
-from src.heartbeat import _validate_url, send_heartbeat
+from backup_handler.heartbeat import _validate_url, send_heartbeat
 
 
 class TestValidateURL:

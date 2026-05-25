@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.verify import print_verify_report, verify_backup_integrity
+from backup_handler.verify import print_verify_report, verify_backup_integrity
 
 
 class TestVerification:

@@ -60,7 +60,7 @@ security = [
 ]
 
 [project.scripts]
-backup-handler = "main:main"
+backup-handler = "backup_handler.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/SP1R4/BackupHandler"
@@ -69,10 +69,12 @@ Issues = "https://github.com/SP1R4/BackupHandler/issues"
 Changelog = "https://github.com/SP1R4/BackupHandler/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
-path = "src/__version__.py"
+path = "src/backup_handler/__version__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/backup_handler"]
+# Bundle non-Python data (bot help text, etc.).
+include = ["src/backup_handler/bot/help/*"]
 
 # ─── Ruff ───────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -81,10 +83,7 @@ target-version = "py310"
 extend-exclude = [
     "venv",
     "skili",
-    "banner",
-    "bot",
     "db_backup",
-    "email_nots",
     "BackupTimestamp",
     "snapshots",
     "Logs",
@@ -129,10 +128,7 @@ extend-exclude = '''
   \.git
   | venv
   | skili
-  | banner
-  | bot
   | db_backup
-  | email_nots
   | snapshots
   | Logs
   | BackupTimestamp
@@ -152,10 +148,7 @@ strict_equality = true
 exclude = [
     "venv/",
     "skili/",
-    "banner/",
-    "bot/",
     "db_backup/",
-    "email_nots/",
     "snapshots/",
     "Logs/",
     "BackupTimestamp/",
@@ -190,7 +183,7 @@ markers = [
 # ─── Coverage ───────────────────────────────────────────────────────────────
 [tool.coverage.run]
 branch = true
-source = ["src"]
+source = ["backup_handler"]
 omit = [
     "*/tests/*",
     "*/venv/*",
@@ -210,7 +203,7 @@ exclude_lines = [
 
 # ─── Bandit ─────────────────────────────────────────────────────────────────
 [tool.bandit]
-exclude_dirs = ["tests", "venv", "skili", "banner", "bot", "db_backup", "email_nots"]
+exclude_dirs = ["tests", "venv", "skili", "db_backup"]
 skips = [
     "B101",  # assert_used — fine in tests
     "B404",  # subprocess import — audited usage

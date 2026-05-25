@@ -7,8 +7,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from src import preflight
-from src.preflight import (
+from backup_handler import preflight
+from backup_handler.preflight import (
     PreflightConfig,
     check_staleness,
     ensure_writable,

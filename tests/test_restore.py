@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.restore import _is_s3_path, _is_ssh_path, _parse_s3_path, _parse_ssh_path
+from backup_handler.restore import _is_s3_path, _is_ssh_path, _parse_s3_path, _parse_ssh_path
 
 
 class TestRemoteRestore:

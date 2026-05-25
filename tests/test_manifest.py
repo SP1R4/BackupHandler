@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.manifest import BackupManifest, load_latest_manifest, load_manifests_up_to
+from backup_handler.manifest import BackupManifest, load_latest_manifest, load_manifests_up_to
 
 
 class TestBackupManifest:

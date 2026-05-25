@@ -20,10 +20,10 @@ from pathlib import Path
 
 import keyring
 
-# Define file paths for storing timestamps of backups (absolute, relative to project root)
-_PROJECT_ROOT = Path(__file__).parent.parent
-TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "backup_timestamp.json"
-FULL_BACKUP_TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "full_backup_timestamp.json"
+from ._paths import TIMESTAMP_DIR
+
+TIMESTAMP_FILE = TIMESTAMP_DIR / "backup_timestamp.json"
+FULL_BACKUP_TIMESTAMP_FILE = TIMESTAMP_DIR / "full_backup_timestamp.json"
 
 
 def should_exclude(file_path: os.PathLike | str, patterns: Iterable[str] | None) -> bool:

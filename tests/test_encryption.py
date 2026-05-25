@@ -7,7 +7,7 @@ import os
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from src.encryption import (
+from backup_handler.encryption import (
     KDF_PBKDF2,
     MAGIC,
     NONCE_SIZE,

@@ -10,7 +10,7 @@ import paramiko
 from retrying import retry
 from tqdm import tqdm
 
-from email_nots.email import send_email
+from .email_attachments import send_email
 
 from .compression import compress_directory
 from .ssh_client import build_ssh_client, explain_host_key_failure

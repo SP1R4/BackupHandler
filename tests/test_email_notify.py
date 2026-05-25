@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from unittest import mock
 
-from src.email_notify import send_smtp_email
+from backup_handler.email_notify import send_smtp_email
 
 
 class TestSMTPEmail:
-    @mock.patch("src.email_notify.smtplib.SMTP")
+    @mock.patch("backup_handler.email_notify.smtplib.SMTP")
     def test_send_email_success(self, mock_smtp_class, logger):
         mock_server = mock.MagicMock()
         mock_smtp_class.return_value = mock_server
@@ -31,7 +31,7 @@ class TestSMTPEmail:
         mock_server.sendmail.assert_called_once()
         mock_server.quit.assert_called_once()
 
-    @mock.patch("src.email_notify.smtplib.SMTP")
+    @mock.patch("backup_handler.email_notify.smtplib.SMTP")
     def test_send_email_no_tls(self, mock_smtp_class, logger):
         mock_server = mock.MagicMock()
         mock_smtp_class.return_value = mock_server
@@ -66,7 +66,7 @@ class TestSMTPEmail:
         )
         assert result is False
 
-    @mock.patch("src.email_notify.smtplib.SMTP")
+    @mock.patch("backup_handler.email_notify.smtplib.SMTP")
     def test_send_email_auth_failure_no_retry(self, mock_smtp_class, logger):
         import smtplib
 
@@ -88,7 +88,7 @@ class TestSMTPEmail:
         assert result is False
         assert mock_smtp_class.call_count == 1
 
-    @mock.patch("src.email_notify.smtplib.SMTP")
+    @mock.patch("backup_handler.email_notify.smtplib.SMTP")
     def test_send_email_retries_on_connection_error(self, mock_smtp_class, logger):
         mock_smtp_class.side_effect = [
             ConnectionError("refused"),

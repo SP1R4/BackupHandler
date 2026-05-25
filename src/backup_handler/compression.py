@@ -6,7 +6,7 @@ from datetime import datetime
 import keyring
 import pyminizip
 
-from email_nots.email import send_email
+from .email_attachments import send_email
 
 
 def save_file_passwd(logger, timestamp, passwd):

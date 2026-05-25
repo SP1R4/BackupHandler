@@ -16,7 +16,7 @@ import re
 import sys
 from pathlib import Path
 
-from src.utils import is_valid_email
+from .utils import is_valid_email
 
 # ─── Schema Version ─────────────────────────────────────────────────────────
 CURRENT_SCHEMA_VERSION = "4"

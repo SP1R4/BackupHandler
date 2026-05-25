@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from src.logger import AppLogger, audit, current_run_id, new_run_id
+from backup_handler.logger import AppLogger, audit, current_run_id, new_run_id
 
 
 class TestRunID:
