@@ -161,8 +161,26 @@ module = [
     "telebot.*",
     "keyring.*",
     "retrying.*",
+    "argon2.*",
+    "boto3.*",
+    "botocore.*",
 ]
 ignore_missing_imports = true
+
+# Strict mode on the leaf modules — small, well-isolated, easy to keep clean.
+# Add modules here as they become type-safe; do not remove from this list.
+[[tool.mypy.overrides]]
+module = [
+    "backup_handler._paths",
+    "backup_handler.encryption",
+    "backup_handler.lock",
+    "backup_handler.manifest",
+    "backup_handler.ssh_client",
+    "backup_handler.status",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_no_return = true
 
 # ─── Pytest ─────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
@@ -191,6 +209,11 @@ omit = [
 ]
 
 [tool.coverage.report]
+# Floor below current coverage so CI fails when coverage regresses.
+# Raise as coverage grows; do not lower without discussion. The current
+# baseline reflects the orchestrator/snapshot/restore modules being
+# entirely untested — they're the next units worth covering.
+fail_under = 25
 precision = 1
 show_missing = true
 skip_covered = false

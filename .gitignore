@@ -17,3 +17,4 @@ config/config.ini
 config/.bot_users.json
 .backup-handler.lock
 .claude/
+.coverage

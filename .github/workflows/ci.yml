@@ -57,9 +57,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,test]"
 
-      - name: Mypy
+      - name: Mypy (whole tree, advisory)
         run: mypy src
         continue-on-error: true  # gradual adoption
+
+      - name: Mypy (strict leaves, blocking)
+        # These modules opt in to strict checking via tool.mypy.overrides.
+        # Adding to that list above gates the new module on full typing.
+        run: |
+          mypy \
+            src/backup_handler/_paths.py \
+            src/backup_handler/encryption.py \
+            src/backup_handler/lock.py \
+            src/backup_handler/manifest.py \
+            src/backup_handler/ssh_client.py \
+            src/backup_handler/status.py
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -84,8 +96,11 @@ jobs:
           pip install -e ".[test]"
 
       - name: Run tests with coverage
+        # --cov-fail-under reads the floor from pyproject [tool.coverage.report].
+        # CI fails when coverage drops below the floor; raise the floor as
+        # coverage grows.
         run: |
-          pytest --cov=src --cov-report=xml --cov-report=term-missing
+          pytest --cov=backup_handler --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'

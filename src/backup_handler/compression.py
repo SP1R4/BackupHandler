@@ -4,9 +4,16 @@ import shutil
 from datetime import datetime
 
 import keyring
-import pyminizip
 
 from .email_attachments import send_email
+
+# pyminizip is loaded lazily — it's a C extension that fails to build on
+# newer Python versions, and we only need it for password-protected ZIPs.
+# Plain compression doesn't require it.
+try:
+    import pyminizip  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    pyminizip = None
 
 
 def save_file_passwd(logger, timestamp, passwd):
@@ -48,6 +55,12 @@ def compress_directory(
 
             try:
                 if password:
+                    if pyminizip is None:
+                        raise RuntimeError(
+                            "Password-protected ZIP requested but pyminizip is not installed. "
+                            "Plain compression still works; install pyminizip (or use the "
+                            "future pyzipper backend) to enable zip_pw."
+                        )
                     pyminizip.compress_multiple(files, [], output_zip, password, 5)
                     logger.info(
                         f"Compressed directory '{src_dir}' to '{output_zip}' with password protection"
