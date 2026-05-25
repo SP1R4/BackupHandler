@@ -55,6 +55,36 @@ def should_exclude(file_path: os.PathLike | str, patterns: Iterable[str] | None)
     return False
 
 
+def assert_config_safe_for_hooks(logger, config_path: str | os.PathLike) -> None:
+    """
+    Verify that the config file is safe to use as the source of shell hooks.
+
+    Hooks execute via ``shell=True`` so the config file is the trust boundary.
+    If the file is group/world-writable, *any* local user could inject a hook
+    command into our process. Refuse to run hooks in that case.
+
+    Set ``BACKUP_HANDLER_TRUST_CONFIG=1`` to bypass this check for unusual
+    installs (e.g., Docker volumes with permissive defaults).
+    """
+    if os.environ.get("BACKUP_HANDLER_TRUST_CONFIG") == "1":
+        return
+    try:
+        st = os.stat(config_path)
+    except OSError as e:
+        raise RuntimeError(f"Cannot stat config file {config_path}: {e}") from e
+    # 0o022 mask = group-write or other-write bits.
+    if st.st_mode & 0o022:
+        raise PermissionError(
+            f"Refusing to run hooks: config file {config_path} is writable by "
+            f"group or other (mode {st.st_mode & 0o777:o}). Hooks execute via "
+            f"shell=True, so a non-root writer could inject commands. "
+            f"Run: chmod 600 {config_path}  "
+            f"(or set BACKUP_HANDLER_TRUST_CONFIG=1 to override)."
+        )
+    if logger:
+        logger.debug(f"Config file {config_path} mode {st.st_mode & 0o777:o} — safe for hooks")
+
+
 def run_hook(logger, command: str | None, hook_name: str) -> bool:
     """
     Execute a pre/post backup hook command.
@@ -73,8 +103,8 @@ def run_hook(logger, command: str | None, hook_name: str) -> bool:
     try:
         # shell=True is intentional — hooks are user-supplied commands from
         # config.ini that may legitimately contain pipes, redirects, or env
-        # expansion. The config file itself is the trust boundary (root-owned,
-        # not user input), so treating its contents as code is expected.
+        # expansion. The config file is the trust boundary; call
+        # assert_config_safe_for_hooks() before invoking any hooks.
         result = subprocess.run(  # noqa: S602  # nosec B602
             command,
             shell=True,

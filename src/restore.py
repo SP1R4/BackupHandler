@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .encryption import decrypt_directory
 from .manifest import load_manifests_up_to
+from .ssh_client import build_ssh_client, explain_host_key_failure
 from .utils import verify_backup
 
 # ─── Remote Path Detection & Parsing ────────────────────────────────────────
@@ -87,21 +88,13 @@ def _parse_s3_path(path):
 # ─── Remote Download Handlers ───────────────────────────────────────────────
 
 
-def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
+def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None, known_hosts_path=None):
     """
     Download an entire remote directory via SFTP to a local directory.
 
-    Uses ``paramiko.WarningPolicy`` for host key verification to avoid
-    silently accepting unknown hosts while not failing outright.
-
-    Parameters:
-        logger: Logger instance.
-        ssh_path (str): SSH path (``user@host:/path`` or ``ssh://...``).
-        local_dir (str): Local directory to download files into.
-        ssh_password (str, optional): SSH password for authentication.
-
-    Returns:
-        bool: True if download completed successfully.
+    Uses strict host-key checking via ``paramiko.RejectPolicy``. The host's
+    public key must already be present in ``known_hosts``; otherwise the
+    connection fails with an actionable message.
     """
     try:
         import paramiko
@@ -112,15 +105,19 @@ def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
     user, host, remote_path = _parse_ssh_path(ssh_path)
     logger.info(f"Downloading from SSH: {user}@{host}:{remote_path} -> {local_dir}")
 
-    ssh = paramiko.SSHClient()
-    # WarningPolicy is deliberate — it logs unknown host keys but still connects.
-    # Upgrade to RejectPolicy + known_hosts once we ship a pinning workflow.
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())  # noqa: S507  # nosec B507
+    ssh = build_ssh_client(known_hosts_path=known_hosts_path, logger=logger)
 
     try:
-        ssh.connect(hostname=host, username=user, password=ssh_password)
-        sftp = ssh.open_sftp()
+        try:
+            ssh.connect(hostname=host, username=user, password=ssh_password)
+        except paramiko.SSHException as e:
+            if "not found in known_hosts" in str(e) or "Server" in str(e):
+                logger.error(explain_host_key_failure(host, known_hosts_path))
+            else:
+                logger.error(f"Failed to connect to SSH {host}: {e}")
+            return False
 
+        sftp = ssh.open_sftp()
         try:
             _sftp_download_recursive(sftp, remote_path, local_dir, logger)
         finally:
@@ -243,6 +240,7 @@ def restore_backup(
     s3_access_key=None,
     s3_secret_key=None,
     dry_run=False,
+    known_hosts_path=None,
 ):
     """
     Restore files from a local, SSH, or S3 backup source.
@@ -273,7 +271,13 @@ def restore_backup(
     # Remote SSH restore
     if _is_ssh_path(from_dir):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            if not _download_from_ssh(logger, from_dir, tmp_dir, ssh_password=ssh_password):
+            if not _download_from_ssh(
+                logger,
+                from_dir,
+                tmp_dir,
+                ssh_password=ssh_password,
+                known_hosts_path=known_hosts_path,
+            ):
                 return False
             return _restore_local(
                 logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file

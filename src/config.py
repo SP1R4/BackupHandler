@@ -19,7 +19,7 @@ from pathlib import Path
 from src.utils import is_valid_email
 
 # ─── Schema Version ─────────────────────────────────────────────────────────
-CURRENT_SCHEMA_VERSION = "3"
+CURRENT_SCHEMA_VERSION = "4"
 
 
 # ─── Environment Variable Resolution ────────────────────────────────────────
@@ -180,6 +180,10 @@ def extract_config_values(
         # SSH bandwidth limit
         bandwidth_limit = config.getint("SSH", "bandwidth_limit", fallback=0)
 
+        # SSH host-key pinning: path to known_hosts. Defaults to ~/.ssh/known_hosts
+        # when unset. Unknown hosts cause a hard refusal — no TOFU.
+        ssh_known_hosts = normalize_none(config.get("SSH", "known_hosts", fallback=None))
+
         # S3 config
         s3_bucket = normalize_none(config.get("S3", "bucket", fallback=None))
         s3_prefix = normalize_none(config.get("S3", "prefix", fallback=None)) or ""
@@ -195,6 +199,11 @@ def extract_config_values(
         encryption_key_file = normalize_none(config.get("ENCRYPTION", "key_file", fallback=None))
         encryption_passphrase = normalize_none(config.get("ENCRYPTION", "passphrase", fallback=None))
         encryption_workers = config.getint("ENCRYPTION", "workers", fallback=1)
+        # KDF for passphrase-derived keys: 'pbkdf2' (default) or 'argon2id'.
+        # Argon2id is preferred but requires `pip install backup-handler[argon2]`.
+        # The KDF used for each file is recorded in its header, so this only
+        # affects newly written .enc files — existing files decrypt regardless.
+        encryption_kdf = normalize_none(config.get("ENCRYPTION", "kdf", fallback=None)) or "pbkdf2"
 
         # Database config
         db_user = normalize_none(config.get("DATABASE", "user", fallback=None))
@@ -271,6 +280,7 @@ def extract_config_values(
             ),
             "ssh_username": raw_username,
             "ssh_password": raw_password,
+            "ssh_known_hosts": ssh_known_hosts,
             "schedule_times": (
                 [time.strip() for time in schedule_times.split(",") if time.strip()] if schedule_times else []
             ),
@@ -301,6 +311,7 @@ def extract_config_values(
             "encryption_key_file": encryption_key_file,
             "encryption_passphrase": encryption_passphrase,
             "encryption_workers": max(1, encryption_workers),
+            "encryption_kdf": encryption_kdf,
             "db_mode": config.getboolean("MODES", "db", fallback=False),
             "db_user": db_user,
             "db_password": db_password,

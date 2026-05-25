@@ -1,6 +1,6 @@
 [META]
 # Schema version — used to detect config file compatibility after upgrades
-schema_version = 3
+schema_version = 4
 
 [DEFAULT]
 # REQUIRED: Absolute path to the directory you want to back up
@@ -29,6 +29,11 @@ username = None
 password = None
 # OPTIONAL: Bandwidth limit for SFTP uploads in KB/s (0 = unlimited)
 bandwidth_limit = 0
+# OPTIONAL: Path to known_hosts file for SSH host-key pinning.
+# Defaults to ~/.ssh/known_hosts. Unknown hosts are REFUSED — no TOFU.
+# Provision keys with: ssh-keyscan -H <host> >> ~/.ssh/known_hosts
+# (verify the fingerprint out-of-band before trusting).
+known_hosts = None
 
 [S3]
 # OPTIONAL: S3 bucket name (required if s3 mode is True)
@@ -60,6 +65,10 @@ key_file = None
 passphrase = None
 # OPTIONAL: Number of parallel encryption/decryption threads (default: 1)
 workers = 1
+# OPTIONAL: KDF for passphrase-derived keys: 'pbkdf2' (default) or 'argon2id'.
+# Argon2id is stronger but requires: pip install 'backup-handler[argon2]'.
+# Affects only newly-written .enc files — existing files self-describe their KDF.
+kdf = pbkdf2
 
 [DATABASE]
 # OPTIONAL: MySQL database user (required if db mode is True)

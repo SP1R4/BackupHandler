@@ -58,6 +58,7 @@ from src.sync import (
 )
 from src.tailscale import tailscale_down, tailscale_up
 from src.utils import (
+    assert_config_safe_for_hooks,
     get_last_backup_time,
     get_last_full_backup_time,
     run_hook,
@@ -366,6 +367,7 @@ def main():
             s3_access_key=restore_config.get("s3_access_key"),
             s3_secret_key=restore_config.get("s3_secret_key"),
             dry_run=args.dry_run,
+            known_hosts_path=restore_config.get("ssh_known_hosts"),
         )
         if success:
             logger.info("Restore completed successfully.")
@@ -874,6 +876,13 @@ def backup_operation(
     pre_hook = config_values.get("pre_backup_hook")
     post_hook = config_values.get("post_backup_hook")
 
+    if (pre_hook or post_hook) and config_path:
+        try:
+            assert_config_safe_for_hooks(logger, config_path)
+        except (PermissionError, RuntimeError) as e:
+            logger.error(str(e))
+            return 1
+
     # Retention (CLI --retain overrides config max_count)
     max_age_days = config_values.get("max_age_days", 0)
     max_count = retain if retain is not None else config_values.get("max_count", 0)
@@ -1081,6 +1090,7 @@ def backup_operation(
                         exclude_patterns=exclude_patterns,
                         manifest=manifest,
                         bandwidth_limit=bandwidth_limit,
+                        known_hosts_path=config_values.get("ssh_known_hosts"),
                     )
                     _notify(
                         logger,
@@ -1231,6 +1241,7 @@ def backup_operation(
                         key_file=enc_key_file,
                         logger=logger,
                         workers=enc_workers,
+                        kdf=config_values.get("encryption_kdf", "pbkdf2"),
                     )
                     logger.info(f"Encrypted {count} files in {bdir}")
                 except Exception as e:

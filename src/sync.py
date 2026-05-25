@@ -13,6 +13,7 @@ from tqdm import tqdm
 from email_nots.email import send_email
 
 from .compression import compress_directory
+from .ssh_client import build_ssh_client, explain_host_key_failure
 from .utils import calculate_checksum, generate_otp, handle_symlink, should_exclude, verify_backup
 
 
@@ -320,6 +321,7 @@ def sync_ssh_server(
     exclude_patterns=None,
     manifest=None,
     bandwidth_limit=0,
+    known_hosts_path=None,
 ):
     """
     Sync a local directory to a remote server via SSH using SFTP, with retry logic.
@@ -340,15 +342,22 @@ def sync_ssh_server(
     if logger:
         logger.info(f"Syncing {source_dir} to SSH server: {server} in {mode} mode")
 
-    # Initialize SSH client
-    ssh = paramiko.SSHClient()
-    # WarningPolicy is deliberate — it logs unknown host keys but still connects.
-    # Upgrade to RejectPolicy + known_hosts once we ship a pinning workflow.
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())  # noqa: S507  # nosec B507
+    # Initialize SSH client with strict host-key checking.
+    ssh = build_ssh_client(known_hosts_path=known_hosts_path, logger=logger)
 
     try:
-        # Connect to SSH server using password or private key
-        ssh.connect(hostname=server, username=username, password=password, key_filename=key_filepath)
+        try:
+            ssh.connect(
+                hostname=server, username=username, password=password, key_filename=key_filepath
+            )
+        except paramiko.SSHException as e:
+            # Translate the cryptic paramiko message into something actionable.
+            if "not found in known_hosts" in str(e) or "Server" in str(e):
+                hint = explain_host_key_failure(server, known_hosts_path)
+                if logger:
+                    logger.error(hint)
+                raise paramiko.SSHException(hint) from e
+            raise
 
         if logger:
             logger.info(f"Connected to SSH server: {server}")
@@ -399,6 +408,7 @@ def sync_ssh_servers_concurrently(
     exclude_patterns=None,
     manifest=None,
     bandwidth_limit=0,
+    known_hosts_path=None,
 ):
     """
     Sync a local directory to multiple SSH servers concurrently.
@@ -432,6 +442,7 @@ def sync_ssh_servers_concurrently(
                 exclude_patterns=exclude_patterns,
                 manifest=manifest,
                 bandwidth_limit=bandwidth_limit,
+                known_hosts_path=known_hosts_path,
             )
         except Exception as e:
             if logger:

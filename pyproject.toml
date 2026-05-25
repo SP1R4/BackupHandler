@@ -38,6 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+argon2 = [
+    "argon2-cffi>=23.1",
+]
 dev = [
     "black>=24.0",
     "ruff>=0.5",
