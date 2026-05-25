@@ -130,8 +130,9 @@ jobs:
         run: bandit -r src -c pyproject.toml
 
       - name: pip-audit (dependency scan)
+        # Scans the locked transitives; blocks merges on a known CVE so the
+        # backup tool never ships with an unpatched cryptography/paramiko.
         run: pip-audit --strict --skip-editable
-        continue-on-error: true  # deps-only findings warn but don't block
 
   secrets-scan:
     name: Secrets scan
