@@ -14,7 +14,7 @@ from email_nots.email import send_email
 
 from .compression import compress_directory
 from .ssh_client import build_ssh_client, explain_host_key_failure
-from .utils import calculate_checksum, generate_otp, handle_symlink, should_exclude, verify_backup
+from .utils import calculate_checksum, generate_otp, handle_symlink, should_exclude
 
 
 def sync_directories_with_progress(
@@ -128,21 +128,17 @@ def _copy_single_file(logger, file, src_dir, backup_dir, manifest):
             return
 
         shutil.copy2(file, backup_file)
-        if verify_backup(file, backup_file):
-            (
-                logger.info(f"Successfully backed up {file} to {backup_file}")
-                if logger
-                else print(f"Successfully backed up {file} to {backup_file}")
-            )
+        # Hash source and destination once each instead of three times
+        # (verify_backup() used to recompute, then we recomputed again for
+        # the manifest). For large backups this halves the I/O.
+        src_checksum = calculate_checksum(str(file), logger=logger)
+        dst_checksum = calculate_checksum(str(backup_file), logger=logger)
+        if src_checksum is not None and src_checksum == dst_checksum:
+            logger.info(f"Successfully backed up {file} to {backup_file}")
             if manifest:
-                checksum = calculate_checksum(str(file))
-                manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
+                manifest.record_copy(str(file), file.stat().st_size, checksum=src_checksum)
         else:
-            (
-                logger.error(f"Checksum verification failed for {file}")
-                if logger
-                else print(f"Checksum verification failed for {file}")
-            )
+            logger.error(f"Checksum verification failed for {file}")
             if manifest:
                 manifest.record_failure(str(file), "Checksum verification failed")
     except (OSError, shutil.Error) as e:

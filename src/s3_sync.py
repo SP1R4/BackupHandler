@@ -5,14 +5,53 @@ Uploads local backup files to an AWS S3 bucket with support for full,
 incremental, and differential modes. In incremental/differential mode,
 compares local modification times against S3 object timestamps to skip
 unchanged files. Displays a progress bar via ``tqdm`` during upload.
+
+Multipart uploads interrupted by a crash leave stale parts in the bucket
+that bill until aborted. We sweep abandoned uploads (older than the
+threshold, default 1 day) under our prefix at the start of every sync.
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tqdm import tqdm
 
 from .utils import calculate_checksum, should_exclude
+
+STALE_MULTIPART_HOURS = 24
+
+
+def _abort_stale_multipart_uploads(s3, bucket: str, prefix: str, logger) -> int:
+    """
+    Abort multipart uploads under ``prefix`` older than ``STALE_MULTIPART_HOURS``.
+
+    boto3's TransferManager aborts uploads it sees fail, but a SIGKILL or OOM
+    kill skips that path and the parts sit in S3 incurring storage charges.
+    Pair this sweep with a bucket lifecycle rule for defense in depth.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=STALE_MULTIPART_HOURS)
+    aborted = 0
+    try:
+        paginator = s3.get_paginator("list_multipart_uploads")
+        kwargs = {"Bucket": bucket}
+        if prefix:
+            kwargs["Prefix"] = prefix
+        for page in paginator.paginate(**kwargs):
+            for upload in page.get("Uploads", []) or []:
+                if upload["Initiated"] < cutoff:
+                    try:
+                        s3.abort_multipart_upload(
+                            Bucket=bucket, Key=upload["Key"], UploadId=upload["UploadId"]
+                        )
+                        aborted += 1
+                        logger.info(f"Aborted stale multipart upload: {upload['Key']}")
+                    except Exception as e:
+                        logger.warning(f"Could not abort {upload['Key']}: {e}")
+    except Exception as e:
+        # ListMultipartUploads can fail (perms, bucket missing). Don't block the sync.
+        logger.debug(f"Stale-multipart sweep skipped: {e}")
+    return aborted
 
 
 def sync_to_s3(
@@ -69,6 +108,10 @@ def sync_to_s3(
         session_kwargs["aws_secret_access_key"] = secret_key
 
     s3 = boto3.client("s3", **session_kwargs)
+
+    # Clean up any abandoned multipart uploads from a prior crashed run
+    # before adding new ones — keeps storage costs bounded.
+    _abort_stale_multipart_uploads(s3, bucket, prefix, logger)
 
     # Configure transfer settings for bandwidth and multipart uploads
     from boto3.s3.transfer import TransferConfig

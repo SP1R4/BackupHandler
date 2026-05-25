@@ -197,26 +197,33 @@ def show_status(logger, config_path):
     else:
         print("\nScheduled times: Not configured")
 
-    # Backup directory sizes
+    # Backup directory sizes. Prefer the latest manifest's total_bytes
+    # (free, instant). Walking rglob().stat() on a multi-TB backup tree
+    # blocked --status for tens of seconds on real installs.
     backup_dirs = config_values.get("backup_dirs", [])
     if backup_dirs:
         print("\nBackup directories:")
         for bdir in backup_dirs:
             bpath = Path(bdir)
-            if bpath.exists():
-                total_size = sum(f.stat().st_size for f in bpath.rglob("*") if f.is_file())
-                # Human-readable size
-                if total_size >= 1073741824:
-                    size_str = f"{total_size / 1073741824:.2f} GB"
-                elif total_size >= 1048576:
-                    size_str = f"{total_size / 1048576:.2f} MB"
-                elif total_size >= 1024:
-                    size_str = f"{total_size / 1024:.2f} KB"
-                else:
-                    size_str = f"{total_size} B"
-                print(f"  {bdir}: {size_str}")
-            else:
+            if not bpath.exists():
                 print(f"  {bdir}: (not found)")
+                continue
+            cached = load_latest_manifest(bdir)
+            if cached and cached.get("total_bytes") is not None:
+                total_size = cached["total_bytes"]
+                suffix = " (from manifest)"
+            else:
+                total_size = sum(f.stat().st_size for f in bpath.rglob("*") if f.is_file())
+                suffix = ""
+            if total_size >= 1073741824:
+                size_str = f"{total_size / 1073741824:.2f} GB"
+            elif total_size >= 1048576:
+                size_str = f"{total_size / 1048576:.2f} MB"
+            elif total_size >= 1024:
+                size_str = f"{total_size / 1024:.2f} KB"
+            else:
+                size_str = f"{total_size} B"
+            print(f"  {bdir}: {size_str}{suffix}")
 
     # Latest manifest summary
     if backup_dirs:

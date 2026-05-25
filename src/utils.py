@@ -164,16 +164,27 @@ def get_last_backup_time() -> int:
         return 0  # Default to epoch if no backup has been performed
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON to a temp file, fsync, then rename onto the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(data).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
 def update_last_backup_time() -> None:
     """
     Update the timestamp of the last incremental backup.
 
-    This function writes the current time (in seconds since epoch) to the JSON file.
+    Written atomically (temp + fsync + rename) so a concurrent reader or
+    a power-cut never sees a half-written timestamp file.
     """
-    TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = {"last_backup_time": int(time.time())}
-    with open(TIMESTAMP_FILE, "w") as f:
-        json.dump(data, f)
+    _atomic_write_json(TIMESTAMP_FILE, {"last_backup_time": int(time.time())})
 
 
 def get_last_full_backup_time() -> int:
@@ -194,15 +205,8 @@ def get_last_full_backup_time() -> int:
 
 
 def update_last_full_backup_time() -> None:
-    """
-    Update the timestamp of the last full backup.
-
-    This function writes the current time (in seconds since epoch) to the JSON file.
-    """
-    FULL_BACKUP_TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = {"last_full_backup_time": int(time.time())}
-    with open(FULL_BACKUP_TIMESTAMP_FILE, "w") as f:
-        json.dump(data, f)
+    """Update the timestamp of the last full backup (atomic, see update_last_backup_time)."""
+    _atomic_write_json(FULL_BACKUP_TIMESTAMP_FILE, {"last_full_backup_time": int(time.time())})
 
 
 def calculate_checksum(file_path: os.PathLike | str, logger=None) -> str | None:

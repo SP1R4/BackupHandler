@@ -16,10 +16,25 @@ decryption keys.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Manifest filenames must match exactly: backup_manifest_YYYYMMDD_HHMMSS.json
+# Anything else (truncated names, foreign files) is ignored when sorting.
+_MANIFEST_RE = re.compile(r"^backup_manifest_(\d{8}_\d{6})\.json$")
+
+
+def _valid_manifests(directory: Path) -> list[tuple[str, Path]]:
+    """Return (timestamp, path) pairs for files whose name matches the manifest pattern."""
+    found: list[tuple[str, Path]] = []
+    for p in directory.glob("backup_manifest_*.json"):
+        m = _MANIFEST_RE.match(p.name)
+        if m:
+            found.append((m.group(1), p))
+    return found
 
 
 class BackupManifest:
@@ -112,41 +127,30 @@ class BackupManifest:
 
 
 def load_latest_manifest(directory: Path | str) -> dict[str, Any] | None:
-    """
-    Load the most recent backup manifest from a directory.
-
-    Parameters:
-    - directory (str or Path): Directory to search for manifest files.
-
-    Returns:
-    - dict or None: Parsed manifest data, or None if no manifest found.
-    """
+    """Load the most recent backup manifest from a directory, or None."""
     directory = Path(directory)
-    manifests = sorted(directory.glob("backup_manifest_*.json"), reverse=True)
-    if not manifests:
+    matches = _valid_manifests(directory)
+    if not matches:
         return None
-    with open(manifests[0]) as f:
+    matches.sort(reverse=True)  # lexicographic on YYYYMMDD_HHMMSS == chronological
+    _, latest_path = matches[0]
+    with open(latest_path) as f:
         return json.load(f)
 
 
 def load_manifests_up_to(directory: Path | str, timestamp: str) -> list[dict[str, Any]]:
     """
-    Load all manifests up to (and including) the given timestamp, sorted chronologically.
+    Load all manifests up to (and including) ``timestamp``, sorted oldest-first.
 
-    Parameters:
-    - directory (str or Path): Directory containing manifest files.
-    - timestamp (str): Cutoff timestamp in YYYYMMDD_HHMMSS format.
-
-    Returns:
-    - list of dict: Manifests sorted oldest-first.
+    Files whose names don't match ``backup_manifest_YYYYMMDD_HHMMSS.json`` are
+    silently skipped.
     """
     directory = Path(directory)
+    matches = _valid_manifests(directory)
+    matches.sort()
     manifests = []
-    for manifest_file in sorted(directory.glob("backup_manifest_*.json")):
-        # Extract timestamp from filename
-        name = manifest_file.stem  # backup_manifest_YYYYMMDD_HHMMSS
-        parts = name.replace("backup_manifest_", "")
-        if parts <= timestamp:
+    for ts, manifest_file in matches:
+        if ts <= timestamp:
             with open(manifest_file) as f:
                 data = json.load(f)
                 data["_manifest_path"] = str(manifest_file)
