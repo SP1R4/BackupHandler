@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=for-the-badge&logo=linux&logoColor=white" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/version-2.6.0--dev-orange?style=for-the-badge" alt="Version">
@@ -55,6 +55,40 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 
 ---
 
+## Why this vs. restic / borg / duplicity?
+
+Backup Handler is **not** a content-addressable deduplicating archiver. If you want
+the smallest possible cold storage with chunk-level dedup and cryptographically
+verified history, use restic or borg. Those projects are excellent and have years
+of audit history.
+
+Backup Handler exists for a different shape of problem: **an operator who needs
+their backups to also notify, schedule, snapshot the OS, recover from a wiped
+disk, and route through a private VPN** — without writing a wrapper around
+restic + cron + systemd + a notification service. Specifically:
+
+- **Telegram / Slack / Discord / Teams notifications first-class**, not bolted on.
+  Most backup tools log; this one pages.
+- **Tailscale integration** brings the tailnet up before the backup, tears it down
+  after. No ambient VPN required.
+- **System snapshot + restore script generator**: capture installed packages,
+  configs, services, dotfiles, and emit a shell script that rebuilds the host
+  from a fresh OS. Restic/borg back up *files*; this also backs up the *state
+  that makes the files useful*.
+- **Pre-flight self-heal** verifies the destination mountpoint AND the backing
+  device's LABEL/UUID before each run, auto-mounts via sudo with a fstab
+  fallback, and emits a local-MTA alert when DNS is down. The silent
+  "backup ran for 16 days into an empty stub directory" failure mode is
+  designed away, not just documented.
+- **INI configuration with env-var interpolation** — readable, diff-able, and
+  easy to manage with config-management tools. No DSL, no embedded scripting.
+
+If you only need "copy files to S3 nightly" — use restic. If you need any two
+of {Telegram, Tailscale, snapshot-for-rebuild, preflight self-heal, INI config}
+together, this fits.
+
+---
+
 ## Features
 
 | Category | Details |
@@ -67,7 +101,7 @@ Designed for sysadmins and power users who need a reliable, scriptable backup so
 | **Database Backups** | MySQL dumps via `mysqldump` with `--single-transaction` support and binary log position tracking |
 | **Encryption at Rest** | AES-256-GCM encryption with parallel processing via ThreadPoolExecutor and progress bars |
 | **Deduplication** | File-level deduplication using hardlinks within and across backup directories with progress bars |
-| **Compression** | ZIP compression with optional password protection (AES encryption via pyminizip) |
+| **Compression** | ZIP compression with optional WinZip AES-256 password protection (pyzipper) |
 | **Backup Verification** | Verify backup integrity against manifest SHA-256 checksums with encrypted file support |
 | **Restore** | Restore from local directories, ZIP archives, SSH remotes, or S3 with point-in-time and dry-run support |
 | **Retention Policies** | Auto-cleanup by age (days) and count (N most recent), configurable per run |
@@ -660,205 +694,31 @@ Generate pre-auth keys at [Tailscale Admin Console](https://login.tailscale.com/
 
 ## Pre-flight Self-Heal
 
-The pre-flight stage is the answer to a real production incident: on
-2026-04-16 a backup target's external disk got unmounted, the kernel
-exposed the mountpoint as a regular root-owned directory on the system
-disk, the script crashed in a pre-logger code path, Telegram failed
-because DNS was down, and **16 days of cron firings produced zero
-backups and zero alerts**. Every defense we had assumed at least one
-channel would still work; in that incident none did.
+Pre-flight verifies the destination mountpoint AND the backing device's
+LABEL/UUID before every backup, auto-mounts the volume via `sudo -n mount`,
+appends a missing fstab entry, ensures writability, and emits a JSON status
+sentinel + local-MTA mail on fatal failure.
 
-The redesigned pre-flight runs before every backup and assumes nothing.
-It is configured under `[PREFLIGHT]` in `config/config.ini`:
-
-```ini
-[PREFLIGHT]
-enabled = True
-expected_mount = /mnt/data
-expected_label = DATA                                # XFS / ext4 LABEL
-expected_uuid = 5a719803-02d0-4834-81af-8175d1ec5ef1
-expected_fs_type = xfs
-expected_owner = sp1r4-r
-auto_mount = True
-auto_fix_ownership = False                           # safer default
-ensure_fstab = True
-staleness_factor = 2.0                               # x interval_minutes
-local_mail_to = root                                 # DNS-independent alerts
-```
-
-What runs, in order:
-
-1. **Logger first.** `AppLogger` is initialized before `print_banner`,
-   `setup_argparse`, or any filesystem operation, so a crash in any
-   pre-flight step is *always* logged.
-2. **Mountpoint identity.** `os.path.ismount` proves a real mount.
-   `findmnt` + `blkid` confirm the source device matches
-   `expected_label` / `expected_uuid`. A wrong-volume mount is **fatal**
-   — pre-flight refuses to write a backup onto an impostor disk.
-3. **Auto-mount.** When the mount is missing and `auto_mount = True`,
-   pre-flight tries (in order) `sudo -n mount <mountpoint>`,
-   `sudo -n mount UUID=…`, `sudo -n mount LABEL=…`. Each `sudo` call is
-   non-interactive (`-n`) and relies on the `NOPASSWD` rule the
-   installer drops in `/etc/sudoers.d/backup-handler`.
-4. **fstab maintenance.** With `ensure_fstab = True`, a missing
-   `UUID=…` entry is appended with `nofail,x-systemd.device-timeout=30`,
-   so the disk being absent never blocks boot.
-5. **Writability probe.** A 4-byte file is created and unlinked under
-   the destination root. Mode/ownership mismatches that would surface
-   later as a 5,000-line wave of `Permission denied` errors are caught
-   here.
-6. **JSON status sentinel.** Every run writes
-   `Logs/last_run_status.json` atomically (tmp + rename) at three
-   points: `started` / `success` / `failure`. The sentinel survives
-   even when log rotation drops old `application.log.N` files, and is
-   the source of truth for staleness checks.
-7. **DNS-independent alerting.** On fatal failure pre-flight pipes a
-   short summary to `mail(1)` (or `sendmail`), addressed to
-   `local_mail_to`. The local MTA queues it on the host and delivers
-   when the network returns — no Telegram, no SMTP, no DNS required.
-8. **Staleness check.** If the last sentinel timestamp is older than
-   `staleness_factor x interval_minutes`, a non-fatal `STALE` alert is
-   emitted via every available channel — even if today's run succeeds,
-   you'll still hear that yesterday's didn't.
-
-**Exit codes** propagate the pre-flight outcome to systemd / cron /
-Prometheus: `0` success, `1` config error, `2` pre-flight failure
-(mount, identity, writability), `3` one or more backup modes failed.
-
-The full triage flow lives in [RUNBOOK.md §2.4](RUNBOOK.md).
-
----
+Full details, configuration, and the staleness-alert contract are in
+[`docs/preflight.md`](docs/preflight.md).
 
 ## One-Shot System Install (`--install`)
 
-Standing up the pre-flight self-heal needs five OS-level prerequisites:
-the destination volume mounted and chowned, an fstab entry, a
-`NOPASSWD` sudoers rule for the mount commands, a local MTA, and a live
-smoke test that proves the chain works. Doing this by hand is exactly
-the kind of step that gets skipped — and a self-heal you forgot to
-provision is no self-heal at all.
+`backup-handler --install` performs every OS-level prerequisite — mount,
+fstab (with auto-revert), sudoers via visudo, postfix + bsd-mailx, smoke
+test — in a single privileged invocation. Add `--dry-run` to see the plan.
 
-`--install` is a single privileged invocation that does all of it,
-idempotently:
-
-```bash
-sudo -E /path/to/venv/bin/python /path/to/main.py \
-    --config /path/to/config.ini --install
-
-# Preview without changing anything:
-sudo -E /path/to/venv/bin/python /path/to/main.py \
-    --config /path/to/config.ini --install --dry-run
-```
-
-What each step does:
-
-| Step | Action |
-|------|--------|
-| **mount** | Mounts `expected_mount` if not already mounted (UUID first, LABEL fallback) |
-| **destination** | Creates the backup tree under the mount and chowns it to `expected_owner` |
-| **fstab** | Appends a `nofail,x-systemd.device-timeout=30` entry by `UUID=`. Backs up `/etc/fstab` to a timestamped file first; if `mount -a` fails afterwards, the backup is restored automatically |
-| **sudoers** | Writes the rule into a `mkdtemp` staging file, validates with `visudo -cf`, and only then atomically moves it to `/etc/sudoers.d/backup-handler`. A broken sudoers file can lock you out of the machine — this path makes that impossible |
-| **mta** | `apt-get install postfix bsd-mailx` with `debconf-set-selections "Local only"`. `apt-get update` failures (e.g. one broken third-party repo) are logged as warnings, not fatals — the main archive cache is enough for both packages |
-| **smoke test** | Runs the full pre-flight pipeline against the live config and writes a `installer_smoke_test` sentinel |
-| **handover** | Chowns the project's `Logs/` and `BackupTimestamp/` back to the unprivileged owner so the next normal cron run can write through |
-
-The installer never touches `/etc/fstab` or `/etc/sudoers.d/` without
-both a backup and validation in place. Re-running it is safe: each step
-detects "already done" and returns `skipped`.
-
----
+See [`docs/install.md`](docs/install.md) for what each step does and how
+to recover from a partial install.
 
 ## System Snapshot & Restore
 
-Never lose your system setup to a format again. The snapshot feature captures your entire machine state and generates a restore script that rebuilds everything on a fresh OS install.
+Capture installed packages, dotfiles, services, and configs into a JSON
+manifest. Generate a shell script from any snapshot to rebuild a host on a
+fresh OS. Compare two snapshots with `--snapshot-diff` to see what changed.
 
-### What it captures
-
-| Category | Linux/Ubuntu | Windows |
-|----------|-------------|---------|
-| **Packages** | APT (manually installed), Snap, Flatpak, pipx, pip user, npm global, Cargo, Go | Winget, Chocolatey, pip, npm, Cargo |
-| **Repositories** | APT sources lists, PPAs, GPG keyrings | — |
-| **Configs** | Dotfiles (`.bashrc`, `.gitconfig`, `.ssh/config`, etc.), cron jobs, systemd user services, dconf/GNOME settings, `/etc/fstab`, `/etc/hosts` | Environment variables, dotfiles, scheduled tasks |
-| **Apps** | VS Code extensions + settings, Sublime Text settings, browser profile paths (Firefox, Brave, Chrome), Docker images + compose files | VS Code extensions + settings, WSL distros, Docker |
-| **Security** | SSH key metadata (public only), GPG key IDs | SSH key metadata |
-| **Network** | NetworkManager connections (WiFi/VPN names), WireGuard config names | — |
-| **Shell** | Shell history (last 5000 entries), custom scripts in `~/bin` and `~/.local/bin` | — |
-| **Fonts** | User-installed fonts (`~/.local/share/fonts`) | — |
-
-### Creating a snapshot
-
-```bash
-# Snapshot to default directory (snapshots/)
-python main.py --snapshot
-
-# Snapshot to backup disk
-python main.py --snapshot --snapshot-output /mnt/data/backups/snapshots
-```
-
-Output: `snapshot_<hostname>_<timestamp>.json`
-
-### Generating a restore script
-
-```bash
-python main.py --restore-snapshot snapshots/snapshot_myhost_20260404_135413.json
-```
-
-This generates an executable bash script (Linux) or PowerShell script (Windows) with:
-
-- **14 phased sections** in correct install order (repos → APT → Snap → pip → npm → Cargo → VS Code → dotfiles → cron → dconf → fstab → hosts)
-- **Error-tolerant** — each package install uses `|| warn` so one failure doesn't stop the script
-- **Base64-encoded content** �� dotfiles, VS Code settings, dconf dumps are safely embedded
-- **Correct ownership** — `run_as_user` helper ensures files belong to your user, not root
-- **Manual step reminders** — SSH keys, GPG keys, browser profiles, WiFi passwords, fstab merging
-
-### Running the restore
-
-After a fresh OS install:
-
-```bash
-# Mount your backup disk
-sudo mount /dev/sdb1 /mnt/data
-
-# Review the script first!
-less /mnt/data/backups/snapshots/restore_myhost.sh
-
-# Run it
-chmod +x restore_myhost.sh
-sudo ./restore_myhost.sh
-```
-
-### Comparing snapshots
-
-Track what changed on your system over time:
-
-```bash
-python main.py --snapshot-diff snapshots/march.json snapshots/april.json
-```
-
-Output:
-```
-=== Snapshot Diff ===
-
-  apt:
-    + newpackage
-    - removedpackage
-
-  vscode_extensions:
-    + ms-python.python
-
-  snap:
-    + signal-desktop
-```
-
-### Security notes
-
-- **SSH private keys are NOT captured** — only public key metadata (filenames, types, comments) for reference
-- **GPG private keys are NOT captured** — only key IDs and UIDs
-- **WiFi passwords are NOT captured** — only connection names with a flag indicating if a PSK exists
-- **WireGuard configs are NOT captured** — only config file names
-- All sensitive content must be restored manually from your backup
-
----
+See [`docs/snapshots.md`](docs/snapshots.md) for what each category captures,
+the diff format, and the restore-script structure.
 
 ## Backup Verification
 
@@ -998,34 +858,11 @@ Start-ScheduledTask -TaskName "BackupHandler"
 
 ## Restore Drill
 
-A backup you have never restored is a backup you do not have. The shipped
-drill proves restorability on a schedule:
+`scripts/restore_drill.sh` performs an unattended verify-only restore from
+the most recent backup. Run it on a schedule to catch silent drift between
+"backup ran" and "backup is actually restorable."
 
-```bash
-sudo install -m 0644 contrib/systemd/backup-handler-drill.service /etc/systemd/system/
-sudo install -m 0644 contrib/systemd/backup-handler-drill.timer   /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now backup-handler-drill.timer
-```
-
-The drill runs weekly (`Sun 04:30` by default, override with
-`systemctl edit backup-handler-drill.timer`). Each run:
-
-1. Picks the most recent `backup_manifest_*.json` from the first
-   configured `backup_dirs` entry.
-2. Performs a dry-run restore into `/tmp/backup-drill` and bails if that
-   fails.
-3. Performs a real restore, then `--verify` checks every file's SHA-256
-   against the manifest.
-4. Optionally pings a webhook with pass/fail (set `DRILL_WEBHOOK_URL` in
-   a drop-in).
-
-Exit codes: `0` pass, `1` config problem, `2` restore failed, `3` verify
-failed, `4` drill passed but notification failed. **A failed drill is a
-higher-severity incident than a failed backup** — the backups are
-untrusted until a drill passes.
-
----
+Details and a cron example in [`docs/restore-drill.md`](docs/restore-drill.md).
 
 ## Operations Runbook
 

@@ -54,10 +54,15 @@ Run everything locally before pushing:
 ruff check .
 ruff format --check .
 black --check .
-mypy src
-pytest --cov=src
+mypy src                                            # advisory
+mypy src/backup_handler/{_paths,encryption,lock,manifest,ssh_client,status}.py  # strict
+pytest --cov=backup_handler
 bandit -r src -c pyproject.toml
+pip-audit --strict --skip-editable
 ```
+
+The `pre-commit` hooks installed above run the lint and format checks on
+every commit, so you should rarely need to invoke them manually.
 
 ## Commit messages
 
@@ -111,7 +116,7 @@ All new features need tests. Update `tests/` alongside the code change.
 
 Maintainers only.
 
-1. Update `src/__version__.py`.
+1. Update `src/backup_handler/__version__.py`.
 2. Move `[Unreleased]` entries in `CHANGELOG.md` into a new versioned
    section with today's date.
 3. Commit: `chore(release): v<x.y.z>`.
