@@ -89,10 +89,13 @@ def main() -> None:
     # cron firings produced zero log lines. Logger first, always.
     logger = AppLogger(LOG_PATH, logging.DEBUG).logger
     new_run_id()
-    try:
-        print_banner()
-    except Exception as e:
-        logger.warning(f"Banner failed (non-fatal): {e}")
+    # Skip the ASCII banner under cron / non-interactive shells. Otherwise
+    # every cron firing logs ~30 lines of decorative ANSI escape codes.
+    if sys.stdout.isatty():
+        try:
+            print_banner()
+        except Exception as e:
+            logger.warning(f"Banner failed (non-fatal): {e}")
 
     args = setup_argparse()
     validate_args(args, logger)

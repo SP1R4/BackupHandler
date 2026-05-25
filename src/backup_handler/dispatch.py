@@ -74,7 +74,7 @@ def handle_restore_snapshot(logger, args) -> int:
         output = str(PROJECT_ROOT / "snapshots" / f"{snapshot_name}_restore.sh")
     script_path = generate_restore_script(logger, args.restore_snapshot, output_path=output)
     if not script_path:
-        print("Failed to generate restore script.", file=sys.stderr)
+        logger.error("Failed to generate restore script.")
         return 1
     print(f"\nRestore script generated: {script_path}")
     print("Review it, then run: chmod +x restore.sh && sudo ./restore.sh")
@@ -97,7 +97,40 @@ def handle_snapshot_diff(logger, args) -> int:
     return 0
 
 
+def _is_remote_path(p: str) -> bool:
+    if p.startswith("s3://") or p.startswith("ssh://"):
+        return True
+    head = p.split(":", 1)[0]
+    return "@" in head
+
+
 def handle_restore(logger, args, config_path: str) -> int:
+    # Refuse to restore from a path into itself, or into a path that lives
+    # under it. Either overwrites the backup tree mid-read and corrupts the
+    # restore. Skipped for remote sources — they cannot collide locally.
+    if not _is_remote_path(args.from_dir):
+        try:
+            from_resolved = Path(args.from_dir).resolve()
+            to_resolved = Path(args.to_dir).resolve()
+        except OSError as e:
+            logger.error(f"Cannot resolve restore paths: {e}")
+            return 1
+        if from_resolved == to_resolved:
+            logger.error(
+                f"Refusing to restore: --from-dir and --to-dir resolve to the same path "
+                f"({to_resolved}). Choose a different destination."
+            )
+            return 1
+        try:
+            to_resolved.relative_to(from_resolved)
+            logger.error(
+                f"Refusing to restore: --to-dir ({to_resolved}) lives under "
+                f"--from-dir ({from_resolved}). Choose a destination outside the backup tree."
+            )
+            return 1
+        except ValueError:
+            pass  # destinations are not nested — good
+
     try:
         restore_config = extract_config_values(logger, config_path, skip_validation=True)
     except Exception:
@@ -122,5 +155,4 @@ def handle_restore(logger, args, config_path: str) -> int:
         print("Restore completed successfully.")
         return 0
     logger.error("Restore completed with errors.")
-    print("Restore completed with errors.", file=sys.stderr)
     return 1
