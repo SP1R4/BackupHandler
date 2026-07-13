@@ -151,8 +151,17 @@ jobs:
           sudo ldconfig
 
       - name: Build and install qsafe
+        # SP1R4/Qsafe is private: set the QSAFE_REPO_TOKEN repo secret to a
+        # fine-grained PAT with read access to it. The anonymous fallback
+        # works if the repo is ever made public.
+        env:
+          QSAFE_TOKEN: ${{ secrets.QSAFE_REPO_TOKEN }}
         run: |
-          git clone --depth 1 https://github.com/SP1R4/Qsafe.git /tmp/qsafe
+          if [ -n "$QSAFE_TOKEN" ]; then
+            git clone --depth 1 "https://x-access-token:${QSAFE_TOKEN}@github.com/SP1R4/Qsafe.git" /tmp/qsafe
+          else
+            git clone --depth 1 https://github.com/SP1R4/Qsafe.git /tmp/qsafe
+          fi
           make -C /tmp/qsafe
           sudo make -C /tmp/qsafe install
           qsafe --version
@@ -177,9 +186,11 @@ jobs:
           cache: pip
 
       - name: Install scanners
+        # Non-editable install: pip-audit --strict treats skipped (editable)
+        # distributions as fatal, so the project must be a real dist to audit.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[security]"
+          pip install ".[security]"
 
       - name: Bandit (code scan)
         run: bandit -r src -c pyproject.toml
@@ -187,7 +198,7 @@ jobs:
       - name: pip-audit (dependency scan)
         # Scans the locked transitives; blocks merges on a known CVE so the
         # backup tool never ships with an unpatched cryptography/paramiko.
-        run: pip-audit --strict --skip-editable
+        run: pip-audit --strict
 
   secrets-scan:
     name: Secrets scan
