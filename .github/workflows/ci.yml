@@ -186,19 +186,18 @@ jobs:
           cache: pip
 
       - name: Install scanners
-        # Non-editable install: pip-audit --strict treats skipped (editable)
-        # distributions as fatal, so the project must be a real dist to audit.
         run: |
           python -m pip install --upgrade pip
-          pip install ".[security]"
+          pip install -e ".[security]"
 
       - name: Bandit (code scan)
         run: bandit -r src -c pyproject.toml
 
       - name: pip-audit (dependency scan)
-        # Scans the locked transitives; blocks merges on a known CVE so the
-        # backup tool never ships with an unpatched cryptography/paramiko.
-        run: pip-audit --strict
+        # Audits the lockfile, not the installed environment — the project
+        # itself is not on PyPI, and --strict treats anything it cannot
+        # audit (editable installs, unpublished dists) as fatal.
+        run: pip-audit --strict -r requirements.txt
 
   secrets-scan:
     name: Secrets scan
