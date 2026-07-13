@@ -15,7 +15,9 @@ decryption keys.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -64,11 +66,21 @@ class BackupManifest:
         file_path: Path | str,
         size_bytes: int,
         checksum: str | None = None,
+        rel_path: Path | str | None = None,
     ) -> None:
-        """Record a successfully copied file with optional SHA-256 checksum."""
+        """
+        Record a successfully copied file with optional SHA-256 checksum.
+
+        ``rel_path`` is the file's path relative to the backup destination
+        root. Recording it lets restore/verify resolve files exactly instead
+        of guessing by filename, which can match the wrong file when names
+        repeat across subdirectories.
+        """
         entry: dict[str, Any] = {"path": str(file_path), "size": size_bytes}
         if checksum:
             entry["checksum"] = checksum
+        if rel_path is not None:
+            entry["rel_path"] = str(rel_path)
         self._copied.append(entry)
         self._total_bytes += size_bytes
 
@@ -145,6 +157,52 @@ def load_latest_manifest(directory: Path | str) -> dict[str, Any] | None:
     with open(latest_path) as f:
         data: dict[str, Any] = json.load(f)
     return data
+
+
+def _sha256_file(path: Path) -> str:
+    """Stream a file through SHA-256 in 1 MiB chunks."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def record_encrypted_checksums(manifest_path: Path | str, backup_dir: Path | str) -> int:
+    """
+    Post-encryption pass: record the SHA-256 of each entry's ciphertext.
+
+    For every copied entry whose ``rel_path`` now exists as ``<rel_path>.enc``
+    under ``backup_dir``, adds an ``enc_checksum`` field (hash of the encrypted
+    bytes). This enables keyless integrity verification of encrypted or remote
+    backups and detects two validly-encrypted files being swapped — which
+    AEAD authentication alone cannot catch.
+
+    Rewrites the manifest atomically. Callers that sign manifests must sign
+    AFTER this pass. Returns the number of entries updated.
+    """
+    manifest_path = Path(manifest_path)
+    backup_dir = Path(backup_dir)
+    with open(manifest_path) as f:
+        data: dict[str, Any] = json.load(f)
+
+    updated = 0
+    for entry in data.get("copied", []):
+        rel = entry.get("rel_path")
+        if not rel:
+            continue
+        enc_file = backup_dir / (rel + ".enc")
+        if not enc_file.is_file():
+            continue
+        entry["enc_checksum"] = _sha256_file(enc_file)
+        updated += 1
+
+    if updated:
+        tmp = manifest_path.with_name(manifest_path.name + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, manifest_path)
+    return updated
 
 
 def manifest_signature_status(manifest_path: Path | str, sign_public_key: str) -> str:

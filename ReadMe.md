@@ -102,7 +102,7 @@ together, this fits.
 | **Encryption at Rest** | AES-256-GCM or post-quantum Qsafe (X25519 + ML-KEM-1024) encryption with parallel processing and progress bars |
 | **Deduplication** | File-level deduplication using hardlinks within and across backup directories with progress bars |
 | **Compression** | ZIP compression with optional WinZip AES-256 password protection (pyzipper) |
-| **Backup Verification** | Verify backup integrity against manifest SHA-256 checksums with encrypted file support |
+| **Backup Verification** | Verify backup integrity against manifest SHA-256 checksums — including keyless ciphertext-checksum verification of encrypted backups |
 | **Restore** | Restore from local directories, ZIP archives, SSH remotes, or S3 with point-in-time and dry-run support |
 | **Retention Policies** | Auto-cleanup by age (days) and count (N most recent), configurable per run |
 | **Scheduling** | Built-in scheduler with configurable times and tolerance-based matching |
@@ -608,6 +608,10 @@ Backup Handler supports encryption for backup files at rest with two backends. E
 - Encryption runs after the manifest is saved and before retention cleanup
 - Parallel encryption is supported via `[ENCRYPTION] workers` for faster processing of large backups
 - Progress bars show encryption/decryption progress
+
+### AES backend — streaming format
+
+New `.enc` files use the **v2 streaming format**: chunked AES-256-GCM with a per-chunk counter nonce and a final-chunk flag. Encryption and decryption run in constant memory regardless of file size, and truncating, extending, or reordering chunks fails authentication. Files written by older versions (v1 and pre-versioning) remain fully decryptable.
 
 ### AES backend — key management
 

@@ -113,15 +113,43 @@ def verify_backup_integrity(
             file_path = entry.get("path", "")
             expected_size = entry.get("size", 0)
 
-            # The manifest records original source paths; find the file in the backup dir
-            # Try to resolve relative to backup dir
-            candidate = _find_file_in_backup(bpath, file_path)
+            # Manifests record the backup-relative path (rel_path) since
+            # schema 5 — resolve exactly. Older manifests fall back to
+            # filename-scoring heuristics.
+            rel = entry.get("rel_path")
+            if rel:
+                exact = bpath / rel
+                candidate = exact if exact.is_file() else None
+                enc_exact = bpath / (rel + ".enc")
+                enc_candidate = enc_exact if candidate is None and enc_exact.is_file() else None
+            else:
+                candidate = _find_file_in_backup(bpath, file_path)
+                enc_candidate = _find_encrypted_file(bpath, file_path) if candidate is None else None
 
             if candidate is None:
-                # Check for encrypted version
-                enc_candidate = _find_encrypted_file(bpath, file_path)
-                if enc_candidate and (encryption_passphrase or encryption_key_file or qsafe_secret_key):
-                    # Decrypt to temp file for verification
+                if enc_candidate is None:
+                    logger.warning(f"Missing file: {file_path}")
+                    dir_result["missing"] += 1
+                    results["missing"] += 1
+                    dir_result["details"].append(f"MISSING: {file_path}")
+                    continue
+
+                # Ciphertext checksum (recorded post-encryption) proves the
+                # .enc bytes are the ones this backup wrote — no keys needed,
+                # and it catches two validly-encrypted files being swapped.
+                expected_enc = entry.get("enc_checksum")
+                if expected_enc:
+                    actual_enc = calculate_checksum(str(enc_candidate))
+                    if actual_enc != expected_enc:
+                        logger.warning(f"Ciphertext checksum mismatch for {enc_candidate}")
+                        dir_result["corrupted"] += 1
+                        results["corrupted"] += 1
+                        dir_result["details"].append(f"ENC CHECKSUM MISMATCH: {enc_candidate.name}")
+                        continue
+
+                if encryption_passphrase or encryption_key_file or qsafe_secret_key:
+                    # Authenticate the ciphertext (in place for Qsafe,
+                    # decrypt-to-temp for AES)
                     ok = _verify_encrypted_file(
                         logger,
                         enc_candidate,
@@ -135,18 +163,18 @@ def verify_backup_integrity(
                         results["verified"] += 1
                     else:
                         results["corrupted"] += 1
-                    continue
-                elif enc_candidate:
-                    # Encrypted but no key — can only check existence and size of .enc file
+                elif expected_enc:
+                    # No keys, but the ciphertext hash matched — that is a
+                    # real integrity check, not just an existence check.
+                    dir_result["verified"] += 1
+                    results["verified"] += 1
+                    dir_result["details"].append(f"OK (ciphertext checksum): {enc_candidate.name}")
+                else:
+                    # Encrypted, no key, no recorded ciphertext hash — can
+                    # only confirm the .enc file exists.
                     dir_result["verified"] += 1
                     results["verified"] += 1
                     dir_result["details"].append(f"OK (encrypted, not decrypted): {enc_candidate.name}")
-                    continue
-
-                logger.warning(f"Missing file: {file_path}")
-                dir_result["missing"] += 1
-                results["missing"] += 1
-                dir_result["details"].append(f"MISSING: {file_path}")
                 continue
 
             # Verify size and checksum

@@ -172,7 +172,9 @@ def sync_to_s3(
                 uploaded += 1
                 if manifest:
                     checksum = calculate_checksum(str(local_file))
-                    manifest.record_copy(str(local_file), local_file.stat().st_size, checksum=checksum)
+                    manifest.record_copy(
+                        str(local_file), local_file.stat().st_size, checksum=checksum, rel_path=relative
+                    )
             except Exception as e:
                 logger.error(f"Failed to upload {local_file} to S3: {e}")
                 failed += 1

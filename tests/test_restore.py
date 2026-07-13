@@ -50,3 +50,70 @@ class TestRemoteRestore:
         bucket, prefix = _parse_s3_path("s3://bucket/prefix")
         assert bucket == "bucket"
         assert prefix == "prefix"
+
+
+class TestRelPathRestore:
+    def test_same_name_files_restore_to_correct_locations(self, logger, tmp_dir):
+        """Two same-named files must each restore to their own subdirectory.
+
+        Pre-rel_path manifests resolved entries by rglob(filename)[0], which
+        restored whichever file the walk found first — for both entries.
+        """
+        import json
+
+        from backup_handler.restore import restore_backup
+
+        backup = tmp_dir / "backup"
+        (backup / "app_a").mkdir(parents=True)
+        (backup / "app_b").mkdir(parents=True)
+        (backup / "app_a" / "config.txt").write_text("config for A")
+        (backup / "app_b" / "config.txt").write_text("config for B")
+
+        manifest = {
+            "timestamp": "20260101_120000",
+            "mode": "full",
+            "copied": [
+                {"path": "/src/app_a/config.txt", "size": 12, "rel_path": "app_a/config.txt"},
+                {"path": "/src/app_b/config.txt", "size": 12, "rel_path": "app_b/config.txt"},
+            ],
+            "skipped": [],
+            "failed": [],
+        }
+        (backup / "backup_manifest_20260101_120000.json").write_text(json.dumps(manifest))
+
+        restore_dir = tmp_dir / "restore"
+        ok = restore_backup(logger, str(backup), str(restore_dir), timestamp="20260101_120000")
+        assert ok
+        assert (restore_dir / "app_a" / "config.txt").read_text() == "config for A"
+        assert (restore_dir / "app_b" / "config.txt").read_text() == "config for B"
+
+    def test_restore_rejects_content_not_matching_manifest_checksum(self, logger, tmp_dir):
+        """Backup content altered after the manifest was written must fail the
+        restore, even when the altered file is internally consistent."""
+        import hashlib
+        import json
+
+        from backup_handler.restore import restore_backup
+
+        backup = tmp_dir / "backup"
+        backup.mkdir()
+        (backup / "data.txt").write_text("swapped-in content")
+
+        manifest = {
+            "timestamp": "20260101_120000",
+            "mode": "full",
+            "copied": [
+                {
+                    "path": "/src/data.txt",
+                    "size": 16,
+                    "rel_path": "data.txt",
+                    "checksum": hashlib.sha256(b"original content").hexdigest(),
+                }
+            ],
+            "skipped": [],
+            "failed": [],
+        }
+        (backup / "backup_manifest_20260101_120000.json").write_text(json.dumps(manifest))
+
+        ok = restore_backup(logger, str(backup), str(tmp_dir / "out"), timestamp="20260101_120000")
+        assert not ok

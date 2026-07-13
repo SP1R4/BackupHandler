@@ -32,7 +32,7 @@ from .encryption import encrypt_directory
 from .heartbeat import send_heartbeat
 from .lock import acquire_lock
 from .logger import AppLogger, current_run_id, new_run_id
-from .manifest import BackupManifest, load_latest_manifest
+from .manifest import BackupManifest, load_latest_manifest, record_encrypted_checksums
 from .preflight import (
     PreflightConfig,
     run_preflight,
@@ -862,24 +862,17 @@ def backup_operation(
         print("\n[DRY RUN] Complete. No files were modified.")
         return 0
 
-    # Save manifest to each backup directory (and sign it if configured)
-    sign_key = config_values.get("encryption_qsafe_sign_key")
-    sign_passphrase = config_values.get("encryption_qsafe_sign_passphrase")
+    # Save manifest to each backup directory. Signing happens AFTER the
+    # encryption phase so the signature covers the ciphertext checksums.
+    saved_manifests = {}
     if backup_dirs:
         for bdir in backup_dirs:
             try:
                 manifest_path = manifest.save(bdir)
+                saved_manifests[bdir] = manifest_path
                 logger.info(f"Backup manifest saved to {manifest_path}")
             except Exception as e:
                 logger.error(f"Failed to save manifest to {bdir}: {e}")
-                continue
-            if sign_key:
-                try:
-                    sig_path = str(manifest_path) + ".sig"
-                    qsafe_backend.sign_file(manifest_path, sig_path, sign_key, sign_passphrase)
-                    logger.info(f"Manifest signed (ML-DSA-87): {sig_path}")
-                except Exception as e:
-                    logger.error(f"Failed to sign manifest {manifest_path}: {e}")
 
     # Warn about compression + encryption interaction
     if compress and compress != "none":
@@ -921,6 +914,30 @@ def backup_operation(
                     logger.info(f"Encrypted {count} files in {bdir}")
                 except Exception as e:
                     logger.error(f"Encryption failed for {bdir}: {e}")
+                    continue
+                # Record ciphertext SHA-256s so verify can check integrity
+                # without keys (and detect swapped .enc files)
+                manifest_path = saved_manifests.get(bdir)
+                if manifest_path:
+                    try:
+                        updated = record_encrypted_checksums(manifest_path, bdir)
+                        if updated:
+                            logger.info(f"Recorded {updated} ciphertext checksums in {manifest_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to record ciphertext checksums for {bdir}: {e}")
+
+    # Sign manifests (after encryption + checksum recording, so the
+    # signature covers the final manifest contents)
+    sign_key = config_values.get("encryption_qsafe_sign_key")
+    sign_passphrase = config_values.get("encryption_qsafe_sign_passphrase")
+    if sign_key:
+        for manifest_path in saved_manifests.values():
+            try:
+                sig_path = str(manifest_path) + ".sig"
+                qsafe_backend.sign_file(manifest_path, sig_path, sign_key, sign_passphrase)
+                logger.info(f"Manifest signed (ML-DSA-87): {sig_path}")
+            except Exception as e:
+                logger.error(f"Failed to sign manifest {manifest_path}: {e}")
 
     # Deduplicate backup files (after encryption, before retention)
     dedup_enabled = dedup or config_values.get("dedup_enabled", False)

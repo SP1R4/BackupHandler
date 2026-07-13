@@ -82,6 +82,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed *after* the copy, leaving a plaintext backup on disk.
 - RUNBOOK section 6: Qsafe key inventory, key ceremony, Shamir escrow,
   rotation rules, and escrow-key drill requirements.
+- **Streaming AES format v2** (magic `BHE2`, written by default): files
+  are sealed as chunked AES-256-GCM with a per-chunk counter nonce and a
+  final-chunk flag, so encryption and decryption run in constant memory
+  (a 300 MB file roundtrips in ~34 MB RSS vs whole-file-in-RAM before)
+  and truncating, extending, or reordering chunks fails authentication.
+  v1 and legacy `.enc` files remain fully decryptable.
+- Manifests record each file's **backup-relative path** (`rel_path`).
+  Restore and verify resolve entries exactly instead of guessing by
+  filename — previously two same-named files in different subdirectories
+  could restore the wrong content silently.
+- Manifests record each file's **ciphertext SHA-256** (`enc_checksum`)
+  after encryption: `--verify` now proves encrypted-backup integrity with
+  no keys at all, and detects two validly-encrypted files being swapped —
+  which AEAD authentication alone cannot catch. Manifest signing runs
+  after this pass so signatures cover the checksums.
+- Point-in-time restore compares every restored file against the
+  manifest's recorded plaintext checksum and fails on mismatch — backup
+  content altered after the manifest was written can no longer restore
+  silently.
+- CI: new `qsafe-integration` job builds liboqs (cached) and the Qsafe
+  CLI from source, so the roundtrip/tamper/signature tests actually run
+  on every PR instead of skipping.
 - S3 sync sweeps multipart uploads older than 24 hours under the configured
   prefix at the start of each run. Pairs with a bucket lifecycle rule to keep
   storage costs bounded after crash-killed runs.

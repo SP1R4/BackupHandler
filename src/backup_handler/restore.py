@@ -23,7 +23,7 @@ from pathlib import Path
 from .encryption import decrypt_directory
 from .manifest import load_manifests_up_to, manifest_signature_status
 from .ssh_client import build_ssh_client, explain_host_key_failure
-from .utils import verify_backup
+from .utils import calculate_checksum, verify_backup
 
 # ─── Remote Path Detection & Parsing ────────────────────────────────────────
 
@@ -588,19 +588,23 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp, qsafe_sign_pub=
     copied = 0
     failed = 0
 
-    for file_path, _entry in files_to_restore.items():
-        src = Path(file_path)
-        # Try to find the file in the backup directory structure
-        # The manifest records the original source path; the file is stored
-        # relative to from_dir
-        if src.is_absolute():
-            # Try to find it relative to from_dir
-            for candidate_base in [from_dir]:
-                # Try matching by filename/relative path patterns
-                matches = list(candidate_base.rglob(src.name))
-                if matches:
-                    src = matches[0]
-                    break
+    for file_path, entry in files_to_restore.items():
+        # Manifests record the file's backup-relative path (rel_path) since
+        # schema 5 — resolve exactly. Fall back to filename search only for
+        # older manifests, where same-named files can shadow each other.
+        rel = entry.get("rel_path")
+        if rel:
+            src = from_dir / rel
+        else:
+            src = Path(file_path)
+            if src.is_absolute():
+                # Try to find it relative to from_dir
+                for candidate_base in [from_dir]:
+                    # Try matching by filename/relative path patterns
+                    matches = list(candidate_base.rglob(src.name))
+                    if matches:
+                        src = matches[0]
+                        break
 
         if not src.exists():
             logger.warning(f"Source file not found for restore: {file_path}")
@@ -619,7 +623,23 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp, qsafe_sign_pub=
             dest_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest_file)
 
-            if verify_backup(src, dest_file):
+            # Compare against the checksum the manifest recorded at backup
+            # time, not just src-vs-dest — this catches content that was
+            # swapped or corrupted in the backup itself (e.g. two validly
+            # encrypted files exchanged), which a copy-fidelity check can't.
+            expected_checksum = entry.get("checksum")
+            if expected_checksum:
+                actual_checksum = calculate_checksum(str(dest_file))
+                if actual_checksum != expected_checksum:
+                    logger.error(
+                        f"Restored content does not match the manifest checksum: {relative}. "
+                        "The backup copy was altered after this manifest was written."
+                    )
+                    failed += 1
+                    continue
+                logger.info(f"Restored: {relative}")
+                copied += 1
+            elif verify_backup(src, dest_file):
                 logger.info(f"Restored: {relative}")
                 copied += 1
             else:

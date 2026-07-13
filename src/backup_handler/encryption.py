@@ -11,18 +11,25 @@ aes (default) — symmetric AES-256-GCM. Key sources (KDF identifiers):
     0x01 PBKDF2-HMAC    - SHA256, 600,000 iterations (OWASP minimum).
     0x02 Argon2id       - t=3, m=64MiB, p=1 (optional, requires argon2-cffi).
 
-    Encrypted file format v1 (binary):
+    Encrypted file format v2 (binary, streaming — written by default):
+        [4B magic "BHE2"][1B kdf_id][16B salt][8B nonce_prefix][4B chunk_size BE]
+        followed by one AES-GCM sealed chunk per chunk_size bytes of plaintext.
+
+    Each chunk's nonce is nonce_prefix || (chunk_index | final_flag) where
+    final_flag (top bit) marks the last chunk — so truncating, extending, or
+    reordering chunks invalidates a tag. The full header is bound into every
+    chunk's associated_data, preventing KDF-downgrade and parameter tampering.
+    Both encryption and decryption stream in constant memory.
+
+    Format v1 (read-compatible, no longer written):
         [4B magic "BHE1"][1B kdf_id][16B salt][12B nonce][ciphertext + 16B GCM tag]
+    with magic + kdf_id bound as associated_data.
 
-    The first six bytes (magic + version + kdf_id) are bound into the AEAD
-    associated_data, so flipping the KDF byte or the version invalidates
-    the authentication tag — preventing downgrade attacks.
-
-    Legacy format (pre-versioning):
+    Legacy format (pre-versioning, read-compatible):
         [16B salt][12B nonce][ciphertext + 16B GCM tag]
 
-    Legacy files are detected by the absence of the magic prefix and decrypted
-    via the old code path for backward compatibility.
+    v1 and legacy files are detected by magic prefix (or its absence) and
+    decrypted via their original code paths for backward compatibility.
 
 qsafe — hybrid post-quantum public-key encryption (X25519 + ML-KEM-1024 +
     AES-256-GCM) via the Qsafe project. Files start with a "QSAFE00x"
@@ -45,6 +52,7 @@ from . import qsafe_backend
 
 # ─── Format constants ───────────────────────────────────────────────────────
 MAGIC = b"BHE1"
+MAGIC_V2 = b"BHE2"
 MAGIC_LEN = len(MAGIC)
 KDF_KEYFILE = 0x00
 KDF_PBKDF2 = 0x01
@@ -61,6 +69,14 @@ KEY_SIZE = 32
 
 _HEADER_PREFIX_LEN = MAGIC_LEN + 1
 _HEADER_LEN_V1 = _HEADER_PREFIX_LEN + SALT_SIZE + NONCE_SIZE
+
+# ─── v2 streaming constants ─────────────────────────────────────────────────
+AES_CHUNK_SIZE = 1024 * 1024  # plaintext bytes per sealed chunk
+_NONCE_PREFIX_SIZE = 8
+_GCM_TAG_SIZE = 16
+_HEADER_LEN_V2 = _HEADER_PREFIX_LEN + SALT_SIZE + _NONCE_PREFIX_SIZE + 4
+_FINAL_CHUNK_FLAG = 0x80000000
+_MAX_CHUNK_SIZE = 64 * 1024 * 1024  # sanity bound when parsing headers
 
 
 def _derive_pbkdf2(passphrase: str, salt: bytes) -> bytes:
@@ -150,8 +166,9 @@ def encrypt_file(
     Encrypt a single file, writing ``<original>.enc`` and deleting the
     plaintext only after the encrypted file is durable on disk.
 
-    backend 'aes' (default) uses AES-256-GCM in the v1 versioned format;
-    backend 'qsafe' encrypts to the given recipient public keys.
+    backend 'aes' (default) streams AES-256-GCM chunks in the v2 format
+    (constant memory); backend 'qsafe' encrypts to the given recipient
+    public keys.
     """
     path = Path(path)
 
@@ -159,8 +176,6 @@ def encrypt_file(
         return _encrypt_file_qsafe(path, qsafe_recipients or [])
     if backend != "aes":
         raise ValueError(f"Unknown encryption backend: {backend!r}. Use 'aes' or 'qsafe'.")
-
-    plaintext = path.read_bytes()
 
     if key_file:
         kdf_id = KDF_KEYFILE
@@ -173,14 +188,50 @@ def encrypt_file(
     else:
         raise ValueError("Either passphrase or key_file must be provided for encryption")
 
-    nonce = os.urandom(NONCE_SIZE)
-    header_prefix = MAGIC + bytes([kdf_id])
+    return _encrypt_file_aes_v2(path, key, kdf_id, salt)
 
-    aesgcm = AESGCM(key)
-    ciphertext = aesgcm.encrypt(nonce, plaintext, header_prefix)
 
+def _chunk_nonce(prefix: bytes, index: int, final: bool) -> bytes:
+    """Per-chunk GCM nonce: 8B random prefix + 4B counter with a final-chunk flag bit."""
+    if index >= _FINAL_CHUNK_FLAG:
+        raise ValueError("File too large: v2 chunk counter overflow")
+    word = index | (_FINAL_CHUNK_FLAG if final else 0)
+    return prefix + word.to_bytes(4, "big")
+
+
+def _encrypt_file_aes_v2(path: Path, key: bytes, kdf_id: int, salt: bytes) -> Path:
+    """
+    Stream-encrypt one file in the v2 chunked format with constant memory.
+
+    Writes to a tmp file, fsyncs, renames onto ``<name>.enc``, then deletes
+    the plaintext — same durability contract as the old whole-file path.
+    """
     enc_path = path.with_name(path.name + ".enc")
-    _atomic_write(enc_path, header_prefix + salt + nonce + ciphertext)
+    tmp = enc_path.with_name(enc_path.name + ".tmp")
+    nonce_prefix = os.urandom(_NONCE_PREFIX_SIZE)
+    header = MAGIC_V2 + bytes([kdf_id]) + salt + nonce_prefix + AES_CHUNK_SIZE.to_bytes(4, "big")
+    aesgcm = AESGCM(key)
+
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as out, open(path, "rb") as src:
+            out.write(header)
+            index = 0
+            chunk = src.read(AES_CHUNK_SIZE)
+            while True:
+                next_chunk = src.read(AES_CHUNK_SIZE)
+                final = len(next_chunk) == 0
+                nonce = _chunk_nonce(nonce_prefix, index, final)
+                out.write(aesgcm.encrypt(nonce, chunk, header))
+                if final:
+                    break
+                chunk = next_chunk
+                index += 1
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, enc_path)
+    finally:
+        tmp.unlink(missing_ok=True)
     path.unlink()
     return enc_path
 
@@ -212,6 +263,19 @@ def _decrypt_legacy(data: bytes, passphrase: str | None, key_file: str | None) -
     return AESGCM(key).decrypt(nonce, ciphertext, None)
 
 
+def _resolve_decrypt_key(kdf_id: int, salt: bytes, passphrase: str | None, key_file: str | None) -> bytes:
+    """Resolve the AES key for a header's kdf_id, validating credentials."""
+    if kdf_id == KDF_KEYFILE:
+        if not key_file:
+            raise ValueError("File was encrypted with a key file but no key_file was provided for decryption")
+        return load_key_file(key_file)
+    if kdf_id in (KDF_PBKDF2, KDF_ARGON2ID):
+        if not passphrase:
+            raise ValueError(f"File was encrypted with {_kdf_name(kdf_id)} but no passphrase was provided")
+        return derive_key(passphrase, salt, kdf_id=kdf_id)
+    raise ValueError(f"Unsupported KDF id in header: {kdf_id:#x}")
+
+
 def _decrypt_v1(data: bytes, passphrase: str | None, key_file: str | None) -> bytes:
     """Decrypt a v1 .enc payload: [magic][kdf_id][salt][nonce][ct+tag]."""
     kdf_id = data[MAGIC_LEN]
@@ -220,18 +284,57 @@ def _decrypt_v1(data: bytes, passphrase: str | None, key_file: str | None) -> by
     nonce = data[_HEADER_PREFIX_LEN + SALT_SIZE : _HEADER_LEN_V1]
     ciphertext = data[_HEADER_LEN_V1:]
 
-    if kdf_id == KDF_KEYFILE:
-        if not key_file:
-            raise ValueError("File was encrypted with a key file but no key_file was provided for decryption")
-        key = load_key_file(key_file)
-    elif kdf_id in (KDF_PBKDF2, KDF_ARGON2ID):
-        if not passphrase:
-            raise ValueError(f"File was encrypted with {_kdf_name(kdf_id)} but no passphrase was provided")
-        key = derive_key(passphrase, salt, kdf_id=kdf_id)
-    else:
-        raise ValueError(f"Unsupported KDF id in header: {kdf_id:#x}")
-
+    key = _resolve_decrypt_key(kdf_id, salt, passphrase, key_file)
     return AESGCM(key).decrypt(nonce, ciphertext, header_prefix)
+
+
+def _decrypt_v2_stream(enc_path: Path, out_path: Path, passphrase: str | None, key_file: str | None) -> None:
+    """
+    Stream-decrypt a v2 chunked file to ``out_path`` with constant memory.
+
+    Every chunk's tag is verified before its plaintext is written; the
+    final-flag bit in the nonce makes truncation or extension fail loudly.
+    Writes via tmp + fsync + rename so a failed decrypt leaves nothing behind.
+    """
+    with open(enc_path, "rb") as f:
+        header = f.read(_HEADER_LEN_V2)
+        if len(header) != _HEADER_LEN_V2:
+            raise ValueError("Truncated v2 header")
+        kdf_id = header[MAGIC_LEN]
+        salt = header[_HEADER_PREFIX_LEN : _HEADER_PREFIX_LEN + SALT_SIZE]
+        nonce_prefix = header[
+            _HEADER_PREFIX_LEN + SALT_SIZE : _HEADER_PREFIX_LEN + SALT_SIZE + _NONCE_PREFIX_SIZE
+        ]
+        chunk_size = int.from_bytes(header[-4:], "big")
+        if not 0 < chunk_size <= _MAX_CHUNK_SIZE:
+            raise ValueError(f"Invalid v2 chunk size: {chunk_size}")
+
+        key = _resolve_decrypt_key(kdf_id, salt, passphrase, key_file)
+        aesgcm = AESGCM(key)
+        ct_chunk_size = chunk_size + _GCM_TAG_SIZE
+
+        tmp = out_path.with_name(out_path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                index = 0
+                chunk = f.read(ct_chunk_size)
+                if len(chunk) < _GCM_TAG_SIZE:
+                    raise ValueError("Truncated v2 ciphertext: missing final chunk")
+                while True:
+                    next_chunk = f.read(ct_chunk_size)
+                    final = len(next_chunk) == 0
+                    nonce = _chunk_nonce(nonce_prefix, index, final)
+                    out.write(aesgcm.decrypt(nonce, chunk, header))
+                    if final:
+                        break
+                    chunk = next_chunk
+                    index += 1
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, out_path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def decrypt_file(
@@ -242,8 +345,9 @@ def decrypt_file(
 ) -> Path:
     """
     Decrypt a ``.enc`` file. Dispatches by magic prefix: Qsafe files
-    ("QSAFE") decrypt via the qsafe backend using the secret key, BHE1
-    files via AES v1, anything else via the legacy AES path.
+    ("QSAFE") decrypt via the qsafe backend using the secret key, BHE2
+    files via the streaming AES v2 path, BHE1 via AES v1, anything else
+    via the legacy AES path.
 
     For Qsafe files, ``passphrase`` unwraps the secret key.
     """
@@ -269,6 +373,11 @@ def decrypt_file(
             os.replace(tmp, out_path)
         finally:
             tmp.unlink(missing_ok=True)
+        enc_path.unlink()
+        return out_path
+
+    if head[:MAGIC_LEN] == MAGIC_V2:
+        _decrypt_v2_stream(enc_path, out_path, passphrase, key_file)
         enc_path.unlink()
         return out_path
 

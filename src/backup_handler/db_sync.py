@@ -115,7 +115,7 @@ def perform_db_backup(logger, config_values, backup_dirs, manifest, dry_run=Fals
     dump_size = dump_path.stat().st_size
     dump_checksum = calculate_checksum(str(dump_path))
     logger.info(f"Database dump saved: {dump_path} ({dump_size} bytes)")
-    manifest.record_copy(str(dump_path), dump_size, checksum=dump_checksum)
+    manifest.record_copy(str(dump_path), dump_size, checksum=dump_checksum, rel_path=dump_path.name)
 
     # Copy dump to remaining backup directories
     for bdir in backup_dirs[1:]:
@@ -124,7 +124,7 @@ def perform_db_backup(logger, config_values, backup_dirs, manifest, dry_run=Fals
         dest_path = dest_dir / dump_filename
         try:
             shutil.copy2(dump_path, dest_path)
-            manifest.record_copy(str(dest_path), dump_size, checksum=dump_checksum)
+            manifest.record_copy(str(dest_path), dump_size, checksum=dump_checksum, rel_path=dump_filename)
             logger.info(f"Database dump copied to {dest_path}")
         except (OSError, shutil.Error) as e:
             logger.error(f"Failed to copy database dump to {dest_path}: {e}")
