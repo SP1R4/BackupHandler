@@ -13,6 +13,8 @@ Operators provision host keys ahead of time via ``ssh-keyscan -H``.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 from pathlib import Path
 
@@ -25,7 +27,9 @@ class UnknownHostKeyError(RuntimeError):
     """Raised when a remote host's key is not in any known_hosts source."""
 
 
-def _load_known_hosts(client: paramiko.SSHClient, known_hosts_path: str | None, logger) -> None:
+def _load_known_hosts(
+    client: paramiko.SSHClient, known_hosts_path: str | None, logger: logging.Logger | None
+) -> None:
     """Populate the client's host-key store from the given path and the system store."""
     explicit_path = Path(known_hosts_path) if known_hosts_path else DEFAULT_KNOWN_HOSTS
     if explicit_path.exists():
@@ -39,13 +43,13 @@ def _load_known_hosts(client: paramiko.SSHClient, known_hosts_path: str | None, 
             f"(use: ssh-keyscan -H <host> >> {explicit_path})."
         )
     # Also load the user's system store (covers OpenSSH config style locations).
-    try:
+    with contextlib.suppress(OSError):
         client.load_system_host_keys()
-    except OSError:
-        pass
 
 
-def build_ssh_client(known_hosts_path: str | None = None, logger=None) -> paramiko.SSHClient:
+def build_ssh_client(
+    known_hosts_path: str | None = None, logger: logging.Logger | None = None
+) -> paramiko.SSHClient:
     """
     Build a paramiko SSHClient with strict host-key checking.
 

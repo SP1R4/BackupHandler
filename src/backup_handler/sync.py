@@ -10,11 +10,10 @@ import paramiko
 from retrying import retry
 from tqdm import tqdm
 
-from .email_attachments import send_email
-
 from .compression import compress_directory
+from .email_attachments import send_email
 from .ssh_client import build_ssh_client, explain_host_key_failure
-from .utils import calculate_checksum, generate_otp, handle_symlink, should_exclude
+from .utils import calculate_checksum, generate_otp, handle_symlink, should_exclude, verify_backup
 
 
 def sync_directories_with_progress(

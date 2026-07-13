@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import logging
 import os
 import sys
 from pathlib import Path
@@ -35,7 +36,7 @@ def _proc_looks_like_backup_handler(pid: int) -> bool:
     return any(h in comm_value or h in cmdline_value for h in hints)
 
 
-def acquire_lock(logger) -> None:
+def acquire_lock(logger: logging.Logger) -> None:
     """
     Acquire a PID lock file to prevent duplicate scheduled instances.
 

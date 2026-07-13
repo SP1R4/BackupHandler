@@ -85,12 +85,12 @@ class TestEnsureWritable:
     def test_unwritable_returns_fatal_when_no_autofix(self, logger, tmp_dir: Path):
         target = tmp_dir / "ro"
         target.mkdir()
-        os.chmod(target, 0o555)  # noqa: S103 — read-only is the point of this test
+        os.chmod(target, 0o555)
         try:
             r = ensure_writable(logger, target)
             assert r.ok is False and r.fatal is True
         finally:
-            os.chmod(target, 0o755)  # noqa: S103 — restore so tmp_dir cleanup can rmtree
+            os.chmod(target, 0o755)
 
 
 # ─── verify_destination ─────────────────────────────────────────────────────

@@ -23,7 +23,6 @@ from pathlib import Path
 
 from . import qsafe_backend
 from ._paths import CONFIG_DIR, PROJECT_ROOT
-from .bot.BotHandler import TelegramBot
 from .config import extract_config_values
 from .db_sync import perform_db_backup
 from .dedup import deduplicate_backup_dirs
@@ -31,15 +30,14 @@ from .email_notify import send_smtp_email
 from .encryption import encrypt_directory
 from .heartbeat import send_heartbeat
 from .lock import acquire_lock
-from .logger import AppLogger, current_run_id, new_run_id
-from .manifest import BackupManifest, load_latest_manifest, record_encrypted_checksums
+from .logger import current_run_id
+from .manifest import BackupManifest, record_encrypted_checksums
 from .preflight import (
     PreflightConfig,
     run_preflight,
     send_local_mail,
     write_status_sentinel,
 )
-from .restore import restore_backup
 from .retention import cleanup_old_backups
 from .s3_sync import sync_to_s3
 from .sync import (
@@ -57,7 +55,6 @@ from .utils import (
     update_last_backup_time,
     update_last_full_backup_time,
 )
-from .verify import print_verify_report, verify_backup_integrity
 from .webhook_notify import send_webhook
 
 _PROJECT_ROOT = PROJECT_ROOT
@@ -353,11 +350,8 @@ def _check_qsafe_readiness(config_values, encrypt=False):
 
     if not uses_qsafe_backend and not sign_key:
         return None
-    if not qsafe_backend.is_available():
-        return (
-            "Qsafe is configured but neither the qsafe Python bindings nor the "
-            "qsafe CLI are available. Install Qsafe or update [ENCRYPTION]."
-        )
+    # Config completeness first — a missing key path is actionable even on
+    # a host where the qsafe engine also happens to be absent.
     if uses_qsafe_backend:
         recipients = qsafe_backend.parse_recipients(config_values.get("encryption_qsafe_recipients"))
         if not recipients:
@@ -367,6 +361,11 @@ def _check_qsafe_readiness(config_values, encrypt=False):
             return f"Qsafe recipient public key(s) not found: {', '.join(missing)}"
     if sign_key and not Path(sign_key).exists():
         return f"Qsafe manifest signing key not found: {sign_key}"
+    if not qsafe_backend.is_available():
+        return (
+            "Qsafe is configured but neither the qsafe Python bindings nor the "
+            "qsafe CLI are available. Install Qsafe or update [ENCRYPTION]."
+        )
     return None
 
 
@@ -1014,4 +1013,6 @@ def backup_operation(
 
 
 if __name__ == "__main__":
+    from .cli import main
+
     main()

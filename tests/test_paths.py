@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-import os
+from types import ModuleType
 
 import pytest
 
@@ -15,7 +15,7 @@ def fresh_paths(monkeypatch):
     constants reflect the test's env vars rather than import-time defaults.
     """
 
-    def _reload(env: dict | None = None) -> "module":  # type: ignore[name-defined]
+    def _reload(env: dict | None = None) -> ModuleType:
         for k in (
             "BACKUP_HANDLER_CONFIG_DIR",
             "BACKUP_HANDLER_DATA_DIR",
@@ -42,14 +42,14 @@ class TestConfigResolution:
         custom = tmp_dir / "custom_config"
         custom.mkdir()
         m = fresh_paths({"BACKUP_HANDLER_CONFIG_DIR": str(custom)})
-        assert m.CONFIG_DIR == custom
+        assert custom == m.CONFIG_DIR
 
     def test_xdg_used_when_exists(self, tmp_dir, fresh_paths):
         xdg_home = tmp_dir / "xdg"
         xdg_home.mkdir()
         (xdg_home / "backup-handler").mkdir()
         m = fresh_paths({"XDG_CONFIG_HOME": str(xdg_home)})
-        assert m.CONFIG_DIR == xdg_home / "backup-handler"
+        assert xdg_home / "backup-handler" == m.CONFIG_DIR
 
 
 class TestDataResolution:
@@ -57,9 +57,9 @@ class TestDataResolution:
         custom = tmp_dir / "custom_data"
         custom.mkdir()
         m = fresh_paths({"BACKUP_HANDLER_DATA_DIR": str(custom)})
-        assert m.DATA_DIR == custom
-        assert m.LOG_DIR == custom / "Logs"
-        assert m.TIMESTAMP_DIR == custom / "BackupTimestamp"
+        assert custom == m.DATA_DIR
+        assert custom / "Logs" == m.LOG_DIR
+        assert custom / "BackupTimestamp" == m.TIMESTAMP_DIR
 
 
 class TestLockResolution:

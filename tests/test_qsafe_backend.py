@@ -139,8 +139,11 @@ class TestQsafeReadiness:
     def test_unavailable_engine(self, monkeypatch, tmp_dir):
         from backup_handler.orchestrator import _check_qsafe_readiness
 
+        pub = tmp_dir / "ops.pub"
+        pub.write_bytes(b"key material")
         monkeypatch.setattr(qsafe_backend, "is_available", lambda: False)
-        error = _check_qsafe_readiness(self._values())
+        # Config is complete, so the only remaining problem is the engine
+        error = _check_qsafe_readiness(self._values(encryption_qsafe_recipients=str(pub)))
         assert error and "available" in error
 
     def test_ready(self, tmp_dir):

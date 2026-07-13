@@ -46,9 +46,7 @@ class TestAbortStaleMultipartUploads:
         s3 = mock.MagicMock()
         paginator = mock.MagicMock()
         s3.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {"Uploads": [{"Key": "k", "UploadId": "u", "Initiated": old}]}
-        ]
+        paginator.paginate.return_value = [{"Uploads": [{"Key": "k", "UploadId": "u", "Initiated": old}]}]
         s3.abort_multipart_upload.side_effect = RuntimeError("nope")
 
         # No exception; the failed abort is logged at warning level.

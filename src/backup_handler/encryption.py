@@ -39,6 +39,7 @@ qsafe — hybrid post-quantum public-key encryption (X25519 + ML-KEM-1024 +
 
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -97,14 +98,16 @@ def _derive_argon2id(passphrase: str, salt: bytes) -> bytes:
             "Argon2id requested but argon2-cffi is not installed. "
             "Install with: pip install 'backup-handler[argon2]'"
         ) from e
-    return hash_secret_raw(
-        secret=passphrase.encode("utf-8"),
-        salt=salt,
-        time_cost=ARGON2_TIME_COST,
-        memory_cost=ARGON2_MEMORY_COST_KIB,
-        parallelism=ARGON2_PARALLELISM,
-        hash_len=KEY_SIZE,
-        type=Type.ID,
+    return bytes(
+        hash_secret_raw(
+            secret=passphrase.encode("utf-8"),
+            salt=salt,
+            time_cost=ARGON2_TIME_COST,
+            memory_cost=ARGON2_MEMORY_COST_KIB,
+            parallelism=ARGON2_PARALLELISM,
+            hash_len=KEY_SIZE,
+            type=Type.ID,
+        )
     )
 
 
@@ -396,7 +399,7 @@ def encrypt_directory(
     directory: str | os.PathLike,
     passphrase: str | None = None,
     key_file: str | None = None,
-    logger=None,
+    logger: logging.Logger | None = None,
     workers: int = 1,
     kdf: str | None = None,
     backend: str = "aes",
@@ -487,7 +490,7 @@ def decrypt_directory(
     directory: str | os.PathLike,
     passphrase: str | None = None,
     key_file: str | None = None,
-    logger=None,
+    logger: logging.Logger | None = None,
     workers: int = 1,
     qsafe_secret_key: str | None = None,
 ) -> int:

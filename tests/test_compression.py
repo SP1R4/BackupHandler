@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pyzipper
 import pytest
+import pyzipper
 
 from backup_handler.compression import _write_aes_encrypted_zip
 
@@ -37,9 +37,7 @@ class TestAESZipWrite:
         src.mkdir()
         _populate(src)
         output = tmp_dir / "out.zip"
-        _write_aes_encrypted_zip(
-            [str(src / "a.txt")], str(src), str(output), password="correct"
-        )
+        _write_aes_encrypted_zip([str(src / "a.txt")], str(src), str(output), password="correct")
 
         with pyzipper.AESZipFile(output) as zf:
             zf.setpassword(b"wrong")

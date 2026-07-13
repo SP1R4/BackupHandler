@@ -19,7 +19,7 @@ import sys
 
 from colorama import init
 
-from ._paths import CONFIG_DIR, LOG_DIR, PROJECT_ROOT
+from ._paths import CONFIG_DIR, LOG_DIR
 from .argparse_setup import setup_argparse, validate_args
 from .banner.banner_show import print_banner
 from .bot.BotHandler import TelegramBot
@@ -121,9 +121,7 @@ def main() -> None:
 
     telegram_bot = _init_telegram_bot(logger) if args.notifications else None
     receiver_emails = args.receiver if args.notifications else None
-    exclude_patterns = (
-        [p.strip() for p in args.exclude.split(",") if p.strip()] if args.exclude else None
-    )
+    exclude_patterns = [p.strip() for p in args.exclude.split(",") if p.strip()] if args.exclude else None
 
     if args.scheduled:
         try:
@@ -151,9 +149,7 @@ def main() -> None:
         cli_source_dir = cli_source_dir or _cv.get("source_dir")
         cli_backup_dirs = cli_backup_dirs or _cv.get("backup_dirs")
     if args.backup_mode and (not cli_source_dir or not cli_backup_dirs):
-        logger.error(
-            "Source directory and backup directories must be specified when using --backup-mode."
-        )
+        logger.error("Source directory and backup directories must be specified when using --backup-mode.")
         sys.exit(1)
 
     rc = backup_operation(

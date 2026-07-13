@@ -159,7 +159,7 @@ def get_last_backup_time() -> int:
     if TIMESTAMP_FILE.exists():
         with open(TIMESTAMP_FILE) as f:
             data = json.load(f)
-        return data.get("last_backup_time", 0)
+        return int(data.get("last_backup_time", 0))
     else:
         return 0  # Default to epoch if no backup has been performed
 
@@ -199,7 +199,7 @@ def get_last_full_backup_time() -> int:
     if FULL_BACKUP_TIMESTAMP_FILE.exists():
         with open(FULL_BACKUP_TIMESTAMP_FILE) as f:
             data = json.load(f)
-        return data.get("last_full_backup_time", 0)
+        return int(data.get("last_full_backup_time", 0))
     else:
         return 0  # Default to epoch if no full backup has been performed
 
@@ -257,7 +257,7 @@ def _get_backup_checksums(backup: os.PathLike | str) -> dict[str, str]:
     - dict: A dictionary where keys are file paths and values are their SHA-256 checksums.
     """
     checksums = {}
-    for root, _dirs, files in os.walk(backup):
+    for root, _dirs, files in os.walk(str(backup)):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             checksum = calculate_checksum(file_path)

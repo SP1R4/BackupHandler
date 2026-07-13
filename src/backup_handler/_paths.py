@@ -66,9 +66,7 @@ def _resolve_data_dir() -> Path:
         return Path(override)
     # If the dev checkout / existing install has Logs or BackupTimestamp at
     # the package root, keep using that — don't silently move user data.
-    if (_PACKAGE_FALLBACK_ROOT / "Logs").exists() or (
-        _PACKAGE_FALLBACK_ROOT / "BackupTimestamp"
-    ).exists():
+    if (_PACKAGE_FALLBACK_ROOT / "Logs").exists() or (_PACKAGE_FALLBACK_ROOT / "BackupTimestamp").exists():
         return _PACKAGE_FALLBACK_ROOT
     candidates = [
         _xdg_dir("XDG_DATA_HOME", ".local/share") / "backup-handler",

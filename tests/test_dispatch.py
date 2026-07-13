@@ -5,8 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest import mock
 
-import pytest
-
 from backup_handler.dispatch import _is_remote_path, handle_restore
 
 

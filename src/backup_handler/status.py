@@ -8,6 +8,7 @@ latest manifest in each backup directory.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def _human_bytes(n: int) -> str:
     return f"{n} B"
 
 
-def show_status(logger, config_path: str) -> None:
+def show_status(logger: logging.Logger, config_path: str) -> None:
     """Print last-run timestamps, schedule, sizes, and the latest manifest summary."""
     print("\n=== Backup Status ===\n")
 
@@ -48,10 +49,7 @@ def show_status(logger, config_path: str) -> None:
         config_values = {}
 
     schedule_times = config_values.get("schedule_times", [])
-    print(
-        "\nScheduled times: "
-        + (", ".join(schedule_times) if schedule_times else "Not configured")
-    )
+    print("\nScheduled times: " + (", ".join(schedule_times) if schedule_times else "Not configured"))
 
     backup_dirs = config_values.get("backup_dirs", [])
     if backup_dirs:

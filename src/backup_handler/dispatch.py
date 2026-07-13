@@ -13,7 +13,6 @@ calls ``sys.exit`` directly on hard validation errors).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from ._paths import PROJECT_ROOT
