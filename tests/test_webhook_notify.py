@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest import mock
 
-from src.webhook_notify import _validate_url, send_webhook
+from backup_handler.webhook_notify import _validate_url, send_webhook
 
 
 class TestValidateURL:

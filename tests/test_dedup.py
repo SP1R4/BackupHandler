@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.dedup import _file_hash, deduplicate_backup_dirs, deduplicate_directory
+from backup_handler.dedup import _file_hash, deduplicate_backup_dirs, deduplicate_directory
 
 
 class TestDeduplication:

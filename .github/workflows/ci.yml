@@ -57,9 +57,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,test]"
 
-      - name: Mypy
+      - name: Mypy (whole tree, advisory)
         run: mypy src
         continue-on-error: true  # gradual adoption
+
+      - name: Mypy (strict leaves, blocking)
+        # These modules opt in to strict checking via tool.mypy.overrides.
+        # Adding to that list above gates the new module on full typing.
+        run: |
+          mypy \
+            src/backup_handler/_paths.py \
+            src/backup_handler/encryption.py \
+            src/backup_handler/lock.py \
+            src/backup_handler/manifest.py \
+            src/backup_handler/qsafe_backend.py \
+            src/backup_handler/ssh_client.py \
+            src/backup_handler/status.py
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -84,8 +97,11 @@ jobs:
           pip install -e ".[test]"
 
       - name: Run tests with coverage
+        # --cov-fail-under reads the floor from pyproject [tool.coverage.report].
+        # CI fails when coverage drops below the floor; raise the floor as
+        # coverage grows.
         run: |
-          pytest --cov=src --cov-report=xml --cov-report=term-missing
+          pytest --cov=backup_handler --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'
@@ -94,6 +110,69 @@ jobs:
           name: coverage-report
           path: coverage.xml
           retention-days: 7
+
+  qsafe-integration:
+    # The roundtrip/tamper/signature tests in test_qsafe_backend.py skip
+    # when the qsafe CLI is absent — this job builds it from source so
+    # they actually run on every PR instead of silently skipping.
+    name: Qsafe integration (real CLI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev cmake git
+
+      - name: Cache liboqs
+        id: cache-liboqs
+        uses: actions/cache@v4
+        with:
+          path: ~/liboqs-install
+          key: liboqs-0.12.0-${{ runner.os }}
+
+      - name: Build liboqs
+        if: steps.cache-liboqs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 0.12.0 https://github.com/open-quantum-safe/liboqs.git /tmp/liboqs
+          cmake -S /tmp/liboqs -B /tmp/liboqs/build \
+            -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON \
+            -DCMAKE_INSTALL_PREFIX="$HOME/liboqs-install"
+          cmake --build /tmp/liboqs/build -j"$(nproc)"
+          cmake --install /tmp/liboqs/build
+
+      - name: Install liboqs system-wide
+        run: |
+          sudo cp -r "$HOME/liboqs-install/"* /usr/local/
+          sudo ldconfig
+
+      - name: Build and install qsafe
+        # SP1R4/Qsafe is private: set the QSAFE_REPO_TOKEN repo secret to a
+        # fine-grained PAT with read access to it. The anonymous fallback
+        # works if the repo is ever made public.
+        env:
+          QSAFE_TOKEN: ${{ secrets.QSAFE_REPO_TOKEN }}
+        run: |
+          if [ -n "$QSAFE_TOKEN" ]; then
+            git clone --depth 1 "https://x-access-token:${QSAFE_TOKEN}@github.com/SP1R4/Qsafe.git" /tmp/qsafe
+          else
+            git clone --depth 1 https://github.com/SP1R4/Qsafe.git /tmp/qsafe
+          fi
+          make -C /tmp/qsafe
+          sudo make -C /tmp/qsafe install
+          qsafe --version
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run qsafe integration tests
+        run: pytest tests/test_qsafe_backend.py -v --no-cov
 
   security:
     name: Security scan
@@ -115,12 +194,19 @@ jobs:
         run: bandit -r src -c pyproject.toml
 
       - name: pip-audit (dependency scan)
-        run: pip-audit --strict --skip-editable
-        continue-on-error: true  # deps-only findings warn but don't block
+        # Audits the lockfile, not the installed environment — the project
+        # itself is not on PyPI, and --strict treats anything it cannot
+        # audit (editable installs, unpublished dists) as fatal.
+        run: pip-audit --strict -r requirements.txt
 
   secrets-scan:
     name: Secrets scan
     runs-on: ubuntu-latest
+    # Private repo: the action lists PR commits via the API, which needs
+    # explicit pull-requests read (public repos got this implicitly).
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:

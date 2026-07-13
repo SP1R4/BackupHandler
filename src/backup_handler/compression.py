@@ -2,11 +2,37 @@ import io
 import os
 import shutil
 from datetime import datetime
+from pathlib import Path
 
 import keyring
-import pyminizip
+import pyzipper
 
-from email_nots.email import send_email
+from .email_attachments import send_email
+
+
+def _write_aes_encrypted_zip(files: list[str], src_dir: str, output_zip: str, password: str) -> None:
+    """
+    Write ``files`` into ``output_zip`` with AES-256 encryption via pyzipper.
+
+    Replaces the old pyminizip backend, which used ZipCrypto (weak; broken
+    in seconds with known plaintext) and was a C extension that failed to
+    build on Python 3.13+. pyzipper is pure Python and uses WinZip AE-2.
+
+    Each file's arcname is its path relative to ``src_dir`` so the archive
+    mirrors the on-disk structure.
+    """
+    src_root = Path(src_dir)
+    with pyzipper.AESZipFile(
+        output_zip,
+        "w",
+        compression=pyzipper.ZIP_DEFLATED,
+        encryption=pyzipper.WZ_AES,
+    ) as zf:
+        zf.setpassword(password.encode("utf-8"))
+        zf.setencryption(pyzipper.WZ_AES, nbits=256)
+        for f in files:
+            arcname = str(Path(f).relative_to(src_root))
+            zf.write(f, arcname=arcname)
 
 
 def save_file_passwd(logger, timestamp, passwd):
@@ -48,11 +74,10 @@ def compress_directory(
 
             try:
                 if password:
-                    pyminizip.compress_multiple(files, [], output_zip, password, 5)
+                    _write_aes_encrypted_zip(files, src_dir, output_zip, password)
                     logger.info(
-                        f"Compressed directory '{src_dir}' to '{output_zip}' with password protection"
+                        f"Compressed directory '{src_dir}' to '{output_zip}' with AES-256 password protection"
                     )
-
                     save_file_passwd(logger, timestamp, password)
                 else:
                     shutil.make_archive(output_zip[:-4], "zip", src_dir)

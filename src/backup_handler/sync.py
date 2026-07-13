@@ -10,9 +10,9 @@ import paramiko
 from retrying import retry
 from tqdm import tqdm
 
-from email_nots.email import send_email
-
 from .compression import compress_directory
+from .email_attachments import send_email
+from .ssh_client import build_ssh_client, explain_host_key_failure
 from .utils import calculate_checksum, generate_otp, handle_symlink, should_exclude, verify_backup
 
 
@@ -113,7 +113,8 @@ def _sync_parallel(logger, files, src_dir, backup_dir, manifest, parallel_copies
 
 def _copy_single_file(logger, file, src_dir, backup_dir, manifest):
     """Copy a single file from source to backup, with optional manifest recording."""
-    backup_file = Path(backup_dir) / file.relative_to(src_dir)
+    rel_path = file.relative_to(src_dir)
+    backup_file = Path(backup_dir) / rel_path
 
     try:
         # Ensure the destination directory exists
@@ -123,25 +124,23 @@ def _copy_single_file(logger, file, src_dir, backup_dir, manifest):
         if file.is_symlink():
             handle_symlink(logger, str(file), str(backup_file))
             if manifest:
-                manifest.record_copy(str(file), file.stat().st_size if file.exists() else 0)
+                manifest.record_copy(
+                    str(file), file.stat().st_size if file.exists() else 0, rel_path=rel_path
+                )
             return
 
         shutil.copy2(file, backup_file)
-        if verify_backup(file, backup_file):
-            (
-                logger.info(f"Successfully backed up {file} to {backup_file}")
-                if logger
-                else print(f"Successfully backed up {file} to {backup_file}")
-            )
+        # Hash source and destination once each instead of three times
+        # (verify_backup() used to recompute, then we recomputed again for
+        # the manifest). For large backups this halves the I/O.
+        src_checksum = calculate_checksum(str(file), logger=logger)
+        dst_checksum = calculate_checksum(str(backup_file), logger=logger)
+        if src_checksum is not None and src_checksum == dst_checksum:
+            logger.info(f"Successfully backed up {file} to {backup_file}")
             if manifest:
-                checksum = calculate_checksum(str(file))
-                manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
+                manifest.record_copy(str(file), file.stat().st_size, checksum=src_checksum, rel_path=rel_path)
         else:
-            (
-                logger.error(f"Checksum verification failed for {file}")
-                if logger
-                else print(f"Checksum verification failed for {file}")
-            )
+            logger.error(f"Checksum verification failed for {file}")
             if manifest:
                 manifest.record_failure(str(file), "Checksum verification failed")
     except (OSError, shutil.Error) as e:
@@ -241,7 +240,9 @@ def _sftp_upload_directory(
                     logger.info(f"Uploaded {local_file} -> {remote_file}")
                 if manifest:
                     checksum = calculate_checksum(str(local_file))
-                    manifest.record_copy(str(local_file), local_file.stat().st_size, checksum=checksum)
+                    manifest.record_copy(
+                        str(local_file), local_file.stat().st_size, checksum=checksum, rel_path=relative
+                    )
             except Exception as e:
                 if logger:
                     logger.error(f"Failed to upload {local_file}: {e}")
@@ -320,6 +321,7 @@ def sync_ssh_server(
     exclude_patterns=None,
     manifest=None,
     bandwidth_limit=0,
+    known_hosts_path=None,
 ):
     """
     Sync a local directory to a remote server via SSH using SFTP, with retry logic.
@@ -340,15 +342,20 @@ def sync_ssh_server(
     if logger:
         logger.info(f"Syncing {source_dir} to SSH server: {server} in {mode} mode")
 
-    # Initialize SSH client
-    ssh = paramiko.SSHClient()
-    # WarningPolicy is deliberate — it logs unknown host keys but still connects.
-    # Upgrade to RejectPolicy + known_hosts once we ship a pinning workflow.
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())  # noqa: S507  # nosec B507
+    # Initialize SSH client with strict host-key checking.
+    ssh = build_ssh_client(known_hosts_path=known_hosts_path, logger=logger)
 
     try:
-        # Connect to SSH server using password or private key
-        ssh.connect(hostname=server, username=username, password=password, key_filename=key_filepath)
+        try:
+            ssh.connect(hostname=server, username=username, password=password, key_filename=key_filepath)
+        except paramiko.SSHException as e:
+            # Translate the cryptic paramiko message into something actionable.
+            if "not found in known_hosts" in str(e) or "Server" in str(e):
+                hint = explain_host_key_failure(server, known_hosts_path)
+                if logger:
+                    logger.error(hint)
+                raise paramiko.SSHException(hint) from e
+            raise
 
         if logger:
             logger.info(f"Connected to SSH server: {server}")
@@ -399,6 +406,7 @@ def sync_ssh_servers_concurrently(
     exclude_patterns=None,
     manifest=None,
     bandwidth_limit=0,
+    known_hosts_path=None,
 ):
     """
     Sync a local directory to multiple SSH servers concurrently.
@@ -432,6 +440,7 @@ def sync_ssh_servers_concurrently(
                 exclude_patterns=exclude_patterns,
                 manifest=manifest,
                 bandwidth_limit=bandwidth_limit,
+                known_hosts_path=known_hosts_path,
             )
         except Exception as e:
             if logger:
@@ -513,7 +522,8 @@ def perform_incremental_backup(
     for file in tqdm(files, desc="Syncing Incremental Files", unit="files"):
         file_mtime = os.path.getmtime(file)
         for backup_dir in backup_dirs:
-            backup_file = Path(backup_dir) / file.relative_to(source_dir)
+            rel_path = file.relative_to(source_dir)
+            backup_file = Path(backup_dir) / rel_path
             if file_mtime > last_backup_time or not backup_file.exists():
                 try:
                     logger.info(f"Backing up modified or new file: {file} (modified at {file_mtime})")
@@ -521,14 +531,18 @@ def perform_incremental_backup(
                     if file.is_symlink():
                         handle_symlink(logger, str(file), str(backup_file))
                         if manifest:
-                            manifest.record_copy(str(file), file.stat().st_size if file.exists() else 0)
+                            manifest.record_copy(
+                                str(file), file.stat().st_size if file.exists() else 0, rel_path=rel_path
+                            )
                         continue
                     shutil.copy2(file, backup_file)
                     if verify_backup(file, backup_file):
                         logger.info(f"Incremental backup of {file} to {backup_file}")
                         if manifest:
                             checksum = calculate_checksum(str(file))
-                            manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
+                            manifest.record_copy(
+                                str(file), file.stat().st_size, checksum=checksum, rel_path=rel_path
+                            )
                     else:
                         logger.error(f"Checksum verification failed for {file}")
                         failed_count += 1
@@ -577,20 +591,25 @@ def perform_differential_backup(
     for file in tqdm(files, desc="Syncing Differential Files", unit="files"):
         if os.path.getmtime(file) > last_full_backup_time:
             for backup_dir in backup_dirs:
-                backup_file = Path(backup_dir) / file.relative_to(source_dir)
+                rel_path = file.relative_to(source_dir)
+                backup_file = Path(backup_dir) / rel_path
                 try:
                     backup_file.parent.mkdir(parents=True, exist_ok=True)
                     if file.is_symlink():
                         handle_symlink(logger, str(file), str(backup_file))
                         if manifest:
-                            manifest.record_copy(str(file), file.stat().st_size if file.exists() else 0)
+                            manifest.record_copy(
+                                str(file), file.stat().st_size if file.exists() else 0, rel_path=rel_path
+                            )
                         continue
                     shutil.copy2(file, backup_file)
                     if verify_backup(file, backup_file):
                         logger.info(f"Differential backup of {file} to {backup_file}")
                         if manifest:
                             checksum = calculate_checksum(str(file))
-                            manifest.record_copy(str(file), file.stat().st_size, checksum=checksum)
+                            manifest.record_copy(
+                                str(file), file.stat().st_size, checksum=checksum, rel_path=rel_path
+                            )
                     else:
                         logger.error(f"Checksum verification failed for {file}")
                         failed_count += 1

@@ -16,12 +16,20 @@ encrypted copies are never modified.
 import tempfile
 from pathlib import Path
 
+from . import qsafe_backend
 from .encryption import decrypt_file
-from .manifest import load_latest_manifest
+from .manifest import latest_manifest_path, load_latest_manifest, manifest_signature_status
 from .utils import calculate_checksum
 
 
-def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, encryption_key_file=None):
+def verify_backup_integrity(
+    logger,
+    backup_dirs,
+    encryption_passphrase=None,
+    encryption_key_file=None,
+    qsafe_secret_key=None,
+    qsafe_sign_pub=None,
+):
     """
     Verify backup integrity by checking file existence and SHA-256 checksums
     against the latest manifest in each backup directory.
@@ -29,8 +37,14 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
     Parameters:
     - logger: Logger instance.
     - backup_dirs (list): List of backup directory paths to verify.
-    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files.
+    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files
+      (for Qsafe backups, this unwraps the secret key).
     - encryption_key_file (str, optional): Path to key file for decrypting .enc files.
+    - qsafe_secret_key (str, optional): Path to the Qsafe secret key for decrypting
+      Qsafe-encrypted .enc files.
+    - qsafe_sign_pub (str, optional): Path to the Qsafe signing public key. When
+      set, each directory's latest manifest signature is checked before its
+      contents are trusted; an invalid signature marks the manifest corrupted.
 
     Returns:
     - dict: Summary with keys 'total', 'verified', 'missing', 'corrupted', 'errors',
@@ -73,6 +87,24 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
             continue
 
         dir_result["manifest_found"] = True
+
+        # Authenticate the manifest before trusting its contents
+        if qsafe_sign_pub:
+            manifest_file = latest_manifest_path(bdir)
+            sig_status = manifest_signature_status(manifest_file, qsafe_sign_pub)
+            if sig_status == "invalid":
+                logger.error(f"Manifest signature INVALID for {manifest_file} — not trusting it.")
+                dir_result["corrupted"] += 1
+                results["corrupted"] += 1
+                dir_result["details"].append(f"MANIFEST SIGNATURE INVALID: {manifest_file.name}")
+                results["directories"][bdir] = dir_result
+                continue
+            if sig_status == "missing":
+                logger.warning(f"No signature for {manifest_file} (backup made before signing was enabled?)")
+                dir_result["details"].append(f"Manifest unsigned: {manifest_file.name}")
+            else:
+                dir_result["details"].append(f"Manifest signature OK (ML-DSA-87): {manifest_file.name}")
+
         copied_entries = manifest.get("copied", [])
         logger.info(f"Verifying {len(copied_entries)} files from manifest in {bdir}")
 
@@ -81,15 +113,43 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
             file_path = entry.get("path", "")
             expected_size = entry.get("size", 0)
 
-            # The manifest records original source paths; find the file in the backup dir
-            # Try to resolve relative to backup dir
-            candidate = _find_file_in_backup(bpath, file_path)
+            # Manifests record the backup-relative path (rel_path) since
+            # schema 5 — resolve exactly. Older manifests fall back to
+            # filename-scoring heuristics.
+            rel = entry.get("rel_path")
+            if rel:
+                exact = bpath / rel
+                candidate = exact if exact.is_file() else None
+                enc_exact = bpath / (rel + ".enc")
+                enc_candidate = enc_exact if candidate is None and enc_exact.is_file() else None
+            else:
+                candidate = _find_file_in_backup(bpath, file_path)
+                enc_candidate = _find_encrypted_file(bpath, file_path) if candidate is None else None
 
             if candidate is None:
-                # Check for encrypted version
-                enc_candidate = _find_encrypted_file(bpath, file_path)
-                if enc_candidate and (encryption_passphrase or encryption_key_file):
-                    # Decrypt to temp file for verification
+                if enc_candidate is None:
+                    logger.warning(f"Missing file: {file_path}")
+                    dir_result["missing"] += 1
+                    results["missing"] += 1
+                    dir_result["details"].append(f"MISSING: {file_path}")
+                    continue
+
+                # Ciphertext checksum (recorded post-encryption) proves the
+                # .enc bytes are the ones this backup wrote — no keys needed,
+                # and it catches two validly-encrypted files being swapped.
+                expected_enc = entry.get("enc_checksum")
+                if expected_enc:
+                    actual_enc = calculate_checksum(str(enc_candidate))
+                    if actual_enc != expected_enc:
+                        logger.warning(f"Ciphertext checksum mismatch for {enc_candidate}")
+                        dir_result["corrupted"] += 1
+                        results["corrupted"] += 1
+                        dir_result["details"].append(f"ENC CHECKSUM MISMATCH: {enc_candidate.name}")
+                        continue
+
+                if encryption_passphrase or encryption_key_file or qsafe_secret_key:
+                    # Authenticate the ciphertext (in place for Qsafe,
+                    # decrypt-to-temp for AES)
                     ok = _verify_encrypted_file(
                         logger,
                         enc_candidate,
@@ -97,23 +157,24 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
                         encryption_passphrase,
                         encryption_key_file,
                         dir_result,
+                        qsafe_secret_key=qsafe_secret_key,
                     )
                     if ok:
                         results["verified"] += 1
                     else:
                         results["corrupted"] += 1
-                    continue
-                elif enc_candidate:
-                    # Encrypted but no key — can only check existence and size of .enc file
+                elif expected_enc:
+                    # No keys, but the ciphertext hash matched — that is a
+                    # real integrity check, not just an existence check.
+                    dir_result["verified"] += 1
+                    results["verified"] += 1
+                    dir_result["details"].append(f"OK (ciphertext checksum): {enc_candidate.name}")
+                else:
+                    # Encrypted, no key, no recorded ciphertext hash — can
+                    # only confirm the .enc file exists.
                     dir_result["verified"] += 1
                     results["verified"] += 1
                     dir_result["details"].append(f"OK (encrypted, not decrypted): {enc_candidate.name}")
-                    continue
-
-                logger.warning(f"Missing file: {file_path}")
-                dir_result["missing"] += 1
-                results["missing"] += 1
-                dir_result["details"].append(f"MISSING: {file_path}")
                 continue
 
             # Verify size and checksum
@@ -237,12 +298,16 @@ def _find_encrypted_file(backup_dir, original_path):
     return best_match
 
 
-def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file, dir_result):
+def _verify_encrypted_file(
+    logger, enc_path, expected_size, passphrase, key_file, dir_result, qsafe_secret_key=None
+):
     """
     Decrypt an encrypted file to a temporary directory and verify its size.
 
-    The original ``.enc`` file is copied to a temp directory before
-    decryption, ensuring the backup is never modified during verification.
+    Qsafe files are authenticated *in place* — the AEAD tag covers the whole
+    payload, so integrity is proven without ever writing plaintext to disk.
+    AES files are copied to a temp directory, decrypted there, and size-checked,
+    ensuring the backup is never modified during verification.
 
     Parameters:
         logger: Logger instance.
@@ -251,16 +316,31 @@ def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file
         passphrase (str): Encryption passphrase (or None).
         key_file (str): Path to encryption key file (or None).
         dir_result (dict): Per-directory result dict to update counters.
+        qsafe_secret_key (str): Path to the Qsafe secret key (or None).
 
     Returns:
-        bool: True if size matches, False otherwise.
+        bool: True if the file authenticated (and, for AES, size matches).
     """
     try:
+        with open(enc_path, "rb") as f:
+            head = f.read(len(qsafe_backend.QSAFE_MAGIC))
+        if qsafe_backend.is_qsafe_data(head) and qsafe_secret_key:
+            if qsafe_backend.verify_encrypted_file(enc_path, qsafe_secret_key, passphrase):
+                dir_result["verified"] += 1
+                dir_result["details"].append(f"OK (authenticated in place, no plaintext): {enc_path.name}")
+                return True
+            logger.warning(f"Qsafe authentication failed for {enc_path}")
+            dir_result["corrupted"] += 1
+            dir_result["details"].append(f"AUTHENTICATION FAILED: {enc_path.name}")
+            return False
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_enc = Path(tmp_dir) / enc_path.name
             # Copy enc file to temp to avoid modifying original
             tmp_enc.write_bytes(enc_path.read_bytes())
-            decrypted = decrypt_file(tmp_enc, passphrase=passphrase, key_file=key_file)
+            decrypted = decrypt_file(
+                tmp_enc, passphrase=passphrase, key_file=key_file, qsafe_secret_key=qsafe_secret_key
+            )
             actual_size = decrypted.stat().st_size
             if actual_size != expected_size:
                 logger.warning(

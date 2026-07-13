@@ -1,6 +1,6 @@
 [META]
 # Schema version — used to detect config file compatibility after upgrades
-schema_version = 3
+schema_version = 5
 
 [DEFAULT]
 # REQUIRED: Absolute path to the directory you want to back up
@@ -29,6 +29,11 @@ username = None
 password = None
 # OPTIONAL: Bandwidth limit for SFTP uploads in KB/s (0 = unlimited)
 bandwidth_limit = 0
+# OPTIONAL: Path to known_hosts file for SSH host-key pinning.
+# Defaults to ~/.ssh/known_hosts. Unknown hosts are REFUSED — no TOFU.
+# Provision keys with: ssh-keyscan -H <host> >> ~/.ssh/known_hosts
+# (verify the fingerprint out-of-band before trusting).
+known_hosts = None
 
 [S3]
 # OPTIONAL: S3 bucket name (required if s3 mode is True)
@@ -51,15 +56,46 @@ multipart_threshold = 8
 max_concurrency = 10
 
 [ENCRYPTION]
-# OPTIONAL: Enable AES-256-GCM encryption at rest for backup files (True/False)
+# OPTIONAL: Enable encryption at rest for backup files (True/False)
 enabled = False
-# OPTIONAL: Path to a 32-byte raw key file (takes priority over passphrase)
+# OPTIONAL: Encryption backend: 'aes' (symmetric AES-256-GCM, default) or
+# 'qsafe' (hybrid post-quantum public-key: X25519 + ML-KEM-1024 + AES-256-GCM
+# via the Qsafe project — https://github.com/SP1R4/Qsafe).
+# With qsafe, backups are encrypted to public keys: this host never needs the
+# decryption secret. Existing .enc files self-describe their format, so
+# switching backends never breaks old backups.
+backend = aes
+# OPTIONAL (aes): Path to a 32-byte raw key file (takes priority over passphrase)
 key_file = None
-# OPTIONAL: Passphrase for key derivation (PBKDF2-HMAC-SHA256, 600k iterations)
+# OPTIONAL: Passphrase. For 'aes', used for key derivation (PBKDF2/Argon2id).
+# For 'qsafe', unwraps the secret key during restore/verify (or use the
+# QSAFE_PASSPHRASE environment variable).
 # Supports env var syntax: passphrase = ${BACKUP_ENCRYPTION_PASSPHRASE}
 passphrase = None
+# OPTIONAL (qsafe): Comma-separated Qsafe recipient public key paths.
+# Generate with: qsafe keygen. Any one matching secret key decrypts, so you
+# can add an offline escrow key alongside your day-to-day key:
+# qsafe_recipients = /etc/backup/ops.pub, /etc/backup/escrow.pub
+qsafe_recipients = None
+# OPTIONAL (qsafe): Path to the passphrase-wrapped Qsafe secret key.
+# Needed only for restore/verify — leave unset on backup-only hosts.
+qsafe_secret_key = None
+# OPTIONAL: Sign backup manifests with a detached ML-DSA-87 signature
+# (generate the keypair with: qsafe sign-keygen). Works with either backend.
+# sign_key signs manifests at backup time; sign_pub verifies them during
+# verify/restore (invalid signature aborts a manifest-based restore).
+# The signing key's passphrase comes from qsafe_sign_passphrase or the
+# QSAFE_PASSPHRASE environment variable.
+qsafe_sign_key = None
+qsafe_sign_pub = None
+# Supports env var syntax: qsafe_sign_passphrase = ${QSAFE_SIGN_PASSPHRASE}
+qsafe_sign_passphrase = None
 # OPTIONAL: Number of parallel encryption/decryption threads (default: 1)
 workers = 1
+# OPTIONAL (aes): KDF for passphrase-derived keys: 'pbkdf2' (default) or 'argon2id'.
+# Argon2id is stronger but requires: pip install 'backup-handler[argon2]'.
+# Affects only newly-written .enc files — existing files self-describe their KDF.
+kdf = pbkdf2
 
 [DATABASE]
 # OPTIONAL: MySQL database user (required if db mode is True)

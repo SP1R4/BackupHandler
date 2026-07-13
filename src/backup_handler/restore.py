@@ -21,8 +21,9 @@ import zipfile
 from pathlib import Path
 
 from .encryption import decrypt_directory
-from .manifest import load_manifests_up_to
-from .utils import verify_backup
+from .manifest import load_manifests_up_to, manifest_signature_status
+from .ssh_client import build_ssh_client, explain_host_key_failure
+from .utils import calculate_checksum, verify_backup
 
 # ─── Remote Path Detection & Parsing ────────────────────────────────────────
 
@@ -87,21 +88,13 @@ def _parse_s3_path(path):
 # ─── Remote Download Handlers ───────────────────────────────────────────────
 
 
-def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
+def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None, known_hosts_path=None):
     """
     Download an entire remote directory via SFTP to a local directory.
 
-    Uses ``paramiko.WarningPolicy`` for host key verification to avoid
-    silently accepting unknown hosts while not failing outright.
-
-    Parameters:
-        logger: Logger instance.
-        ssh_path (str): SSH path (``user@host:/path`` or ``ssh://...``).
-        local_dir (str): Local directory to download files into.
-        ssh_password (str, optional): SSH password for authentication.
-
-    Returns:
-        bool: True if download completed successfully.
+    Uses strict host-key checking via ``paramiko.RejectPolicy``. The host's
+    public key must already be present in ``known_hosts``; otherwise the
+    connection fails with an actionable message.
     """
     try:
         import paramiko
@@ -112,15 +105,19 @@ def _download_from_ssh(logger, ssh_path, local_dir, ssh_password=None):
     user, host, remote_path = _parse_ssh_path(ssh_path)
     logger.info(f"Downloading from SSH: {user}@{host}:{remote_path} -> {local_dir}")
 
-    ssh = paramiko.SSHClient()
-    # WarningPolicy is deliberate — it logs unknown host keys but still connects.
-    # Upgrade to RejectPolicy + known_hosts once we ship a pinning workflow.
-    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())  # noqa: S507  # nosec B507
+    ssh = build_ssh_client(known_hosts_path=known_hosts_path, logger=logger)
 
     try:
-        ssh.connect(hostname=host, username=user, password=ssh_password)
-        sftp = ssh.open_sftp()
+        try:
+            ssh.connect(hostname=host, username=user, password=ssh_password)
+        except paramiko.SSHException as e:
+            if "not found in known_hosts" in str(e) or "Server" in str(e):
+                logger.error(explain_host_key_failure(host, known_hosts_path))
+            else:
+                logger.error(f"Failed to connect to SSH {host}: {e}")
+            return False
 
+        sftp = ssh.open_sftp()
         try:
             _sftp_download_recursive(sftp, remote_path, local_dir, logger)
         finally:
@@ -238,11 +235,14 @@ def restore_backup(
     timestamp=None,
     encryption_passphrase=None,
     encryption_key_file=None,
+    qsafe_secret_key=None,
+    qsafe_sign_pub=None,
     ssh_password=None,
     s3_region=None,
     s3_access_key=None,
     s3_secret_key=None,
     dry_run=False,
+    known_hosts_path=None,
 ):
     """
     Restore files from a local, SSH, or S3 backup source.
@@ -252,8 +252,14 @@ def restore_backup(
     - from_dir (str): Source — local path, user@host:/path, or s3://bucket/prefix.
     - to_dir (str): Destination directory to restore files to.
     - timestamp (str, optional): Restore to a specific point in time (YYYYMMDD_HHMMSS).
-    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files.
+    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files
+      (for Qsafe backups, this unwraps the secret key).
     - encryption_key_file (str, optional): Path to key file for decrypting .enc files.
+    - qsafe_secret_key (str, optional): Path to the Qsafe secret key for decrypting
+      Qsafe-encrypted .enc files.
+    - qsafe_sign_pub (str, optional): Path to the Qsafe signing public key. When
+      set, manifests used for point-in-time restore must carry a valid ML-DSA-87
+      signature — an invalid signature aborts the restore.
     - ssh_password (str, optional): SSH password for remote restore.
     - s3_region (str, optional): AWS region for S3 restore.
     - s3_access_key (str, optional): AWS access key for S3 restore.
@@ -273,10 +279,23 @@ def restore_backup(
     # Remote SSH restore
     if _is_ssh_path(from_dir):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            if not _download_from_ssh(logger, from_dir, tmp_dir, ssh_password=ssh_password):
+            if not _download_from_ssh(
+                logger,
+                from_dir,
+                tmp_dir,
+                ssh_password=ssh_password,
+                known_hosts_path=known_hosts_path,
+            ):
                 return False
             return _restore_local(
-                logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file
+                logger,
+                Path(tmp_dir),
+                to_path,
+                timestamp,
+                encryption_passphrase,
+                encryption_key_file,
+                qsafe_secret_key,
+                qsafe_sign_pub,
             )
 
     # Remote S3 restore
@@ -292,7 +311,14 @@ def restore_backup(
             ):
                 return False
             return _restore_local(
-                logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file
+                logger,
+                Path(tmp_dir),
+                to_path,
+                timestamp,
+                encryption_passphrase,
+                encryption_key_file,
+                qsafe_secret_key,
+                qsafe_sign_pub,
             )
 
     # Local restore
@@ -311,7 +337,7 @@ def restore_backup(
     if from_path.is_dir():
         # Check if backup contains encrypted files
         has_enc_files = any(from_path.rglob("*.enc"))
-        if has_enc_files and (encryption_passphrase or encryption_key_file):
+        if has_enc_files and (encryption_passphrase or encryption_key_file or qsafe_secret_key):
             logger.info("Encrypted files detected. Decrypting to temporary directory before restore.")
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_path = Path(tmp_dir)
@@ -319,10 +345,16 @@ def restore_backup(
                 shutil.copytree(from_path, tmp_path / "backup", dirs_exist_ok=True)
                 decrypt_dir = tmp_path / "backup"
                 decrypt_directory(
-                    decrypt_dir, passphrase=encryption_passphrase, key_file=encryption_key_file, logger=logger
+                    decrypt_dir,
+                    passphrase=encryption_passphrase,
+                    key_file=encryption_key_file,
+                    qsafe_secret_key=qsafe_secret_key,
+                    logger=logger,
                 )
                 if timestamp:
-                    return _restore_with_manifests(logger, decrypt_dir, to_path, timestamp)
+                    return _restore_with_manifests(
+                        logger, decrypt_dir, to_path, timestamp, qsafe_sign_pub=qsafe_sign_pub
+                    )
                 else:
                     return _restore_full_directory(logger, decrypt_dir, to_path)
         elif has_enc_files:
@@ -332,7 +364,9 @@ def restore_backup(
             )
 
         if timestamp:
-            return _restore_with_manifests(logger, from_path, to_path, timestamp)
+            return _restore_with_manifests(
+                logger, from_path, to_path, timestamp, qsafe_sign_pub=qsafe_sign_pub
+            )
         else:
             return _restore_full_directory(logger, from_path, to_path)
 
@@ -379,7 +413,16 @@ def _dry_run_restore(logger, from_dir, to_dir, timestamp):
 # ─── Local Restore Handlers ─────────────────────────────────────────────────
 
 
-def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase, encryption_key_file):
+def _restore_local(
+    logger,
+    from_path,
+    to_path,
+    timestamp,
+    encryption_passphrase,
+    encryption_key_file,
+    qsafe_secret_key=None,
+    qsafe_sign_pub=None,
+):
     """
     Perform a local restore with automatic encrypted file detection.
 
@@ -389,16 +432,20 @@ def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase,
     manifest-based restore.
     """
     has_enc_files = any(from_path.rglob("*.enc"))
-    if has_enc_files and (encryption_passphrase or encryption_key_file):
+    if has_enc_files and (encryption_passphrase or encryption_key_file or qsafe_secret_key):
         logger.info("Encrypted files detected in downloaded backup. Decrypting before restore.")
         decrypt_directory(
-            from_path, passphrase=encryption_passphrase, key_file=encryption_key_file, logger=logger
+            from_path,
+            passphrase=encryption_passphrase,
+            key_file=encryption_key_file,
+            qsafe_secret_key=qsafe_secret_key,
+            logger=logger,
         )
     elif has_enc_files:
         logger.warning("Encrypted files detected but no encryption credentials. Files will be copied as-is.")
 
     if timestamp:
-        return _restore_with_manifests(logger, from_path, to_path, timestamp)
+        return _restore_with_manifests(logger, from_path, to_path, timestamp, qsafe_sign_pub=qsafe_sign_pub)
     else:
         return _restore_full_directory(logger, from_path, to_path)
 
@@ -486,7 +533,7 @@ def _restore_full_directory(logger, from_dir, to_dir):
     return failed == 0
 
 
-def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
+def _restore_with_manifests(logger, from_dir, to_dir, timestamp, qsafe_sign_pub=None):
     """
     Restore files to a specific point in time using manifest history.
 
@@ -500,6 +547,9 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
         from_dir (Path): Source backup directory containing manifests.
         to_dir (Path): Destination restore directory.
         timestamp (str): Cutoff timestamp in YYYYMMDD_HHMMSS format.
+        qsafe_sign_pub (str, optional): Qsafe signing public key. When set,
+            an invalid manifest signature aborts the restore; a missing one
+            only warns (pre-signing backups).
 
     Returns:
         bool: True if all files were restored without errors.
@@ -513,6 +563,20 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
         )
         return _restore_full_directory(logger, from_dir, to_dir)
 
+    # Authenticate every manifest before replaying it
+    if qsafe_sign_pub:
+        for m in manifests:
+            manifest_file = m.get("_manifest_path", "")
+            status = manifest_signature_status(manifest_file, qsafe_sign_pub)
+            if status == "invalid":
+                logger.error(
+                    f"Manifest signature INVALID: {manifest_file}. "
+                    "Aborting restore — the manifest may have been tampered with."
+                )
+                return False
+            if status == "missing":
+                logger.warning(f"No signature for {manifest_file} (pre-signing backup?). Proceeding.")
+
     logger.info(f"Found {len(manifests)} manifest(s) to apply")
 
     # Collect all files that were copied (latest version wins)
@@ -524,19 +588,23 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
     copied = 0
     failed = 0
 
-    for file_path, _entry in files_to_restore.items():
-        src = Path(file_path)
-        # Try to find the file in the backup directory structure
-        # The manifest records the original source path; the file is stored
-        # relative to from_dir
-        if src.is_absolute():
-            # Try to find it relative to from_dir
-            for candidate_base in [from_dir]:
-                # Try matching by filename/relative path patterns
-                matches = list(candidate_base.rglob(src.name))
-                if matches:
-                    src = matches[0]
-                    break
+    for file_path, entry in files_to_restore.items():
+        # Manifests record the file's backup-relative path (rel_path) since
+        # schema 5 — resolve exactly. Fall back to filename search only for
+        # older manifests, where same-named files can shadow each other.
+        rel = entry.get("rel_path")
+        if rel:
+            src = from_dir / rel
+        else:
+            src = Path(file_path)
+            if src.is_absolute():
+                # Try to find it relative to from_dir
+                for candidate_base in [from_dir]:
+                    # Try matching by filename/relative path patterns
+                    matches = list(candidate_base.rglob(src.name))
+                    if matches:
+                        src = matches[0]
+                        break
 
         if not src.exists():
             logger.warning(f"Source file not found for restore: {file_path}")
@@ -555,7 +623,23 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
             dest_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest_file)
 
-            if verify_backup(src, dest_file):
+            # Compare against the checksum the manifest recorded at backup
+            # time, not just src-vs-dest — this catches content that was
+            # swapped or corrupted in the backup itself (e.g. two validly
+            # encrypted files exchanged), which a copy-fidelity check can't.
+            expected_checksum = entry.get("checksum")
+            if expected_checksum:
+                actual_checksum = calculate_checksum(str(dest_file))
+                if actual_checksum != expected_checksum:
+                    logger.error(
+                        f"Restored content does not match the manifest checksum: {relative}. "
+                        "The backup copy was altered after this manifest was written."
+                    )
+                    failed += 1
+                    continue
+                logger.info(f"Restored: {relative}")
+                copied += 1
+            elif verify_backup(src, dest_file):
                 logger.info(f"Restored: {relative}")
                 copied += 1
             else:

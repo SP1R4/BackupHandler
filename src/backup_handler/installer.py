@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.preflight import (
+from .preflight import (
     PreflightConfig,
     _device_label,
     _device_uuid,

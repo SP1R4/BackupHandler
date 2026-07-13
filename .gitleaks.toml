@@ -1,0 +1,20 @@
+# Gitleaks configuration — extends the default ruleset.
+#
+# The project's own documentation discusses key management at length
+# ("key ceremony", "--key-file backup.key", "escrow/Shamir", ...), which
+# trips the generic-api-key rule on prose and CLI examples — including in
+# historical commits, where rewording cannot help. Docs are allowlisted;
+# code, config, and everything else remain fully scanned.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Project documentation — key-management prose and qsafe CLI placeholder examples"
+paths = [
+    '''ReadMe\.md''',
+    '''RUNBOOK\.md''',
+    '''CHANGELOG\.md''',
+    '''SECURITY\.md''',
+    '''docs/.+\.md''',
+]

@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from src.config import _resolve_all_env_vars, normalize_none, resolve_env_vars
+from backup_handler.config import _resolve_all_env_vars, normalize_none, resolve_env_vars
 
 
 class TestEnvVarResolution:

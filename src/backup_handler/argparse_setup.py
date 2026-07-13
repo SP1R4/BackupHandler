@@ -10,8 +10,8 @@ dependencies after parsing.
 import argparse
 import sys
 
-from src.__version__ import __version__
-from src.utils import is_valid_email
+from .__version__ import __version__
+from .utils import is_valid_email
 
 
 def setup_argparse():

@@ -16,10 +16,10 @@ import re
 import sys
 from pathlib import Path
 
-from src.utils import is_valid_email
+from .utils import is_valid_email
 
 # ─── Schema Version ─────────────────────────────────────────────────────────
-CURRENT_SCHEMA_VERSION = "3"
+CURRENT_SCHEMA_VERSION = "5"
 
 
 # ─── Environment Variable Resolution ────────────────────────────────────────
@@ -180,6 +180,10 @@ def extract_config_values(
         # SSH bandwidth limit
         bandwidth_limit = config.getint("SSH", "bandwidth_limit", fallback=0)
 
+        # SSH host-key pinning: path to known_hosts. Defaults to ~/.ssh/known_hosts
+        # when unset. Unknown hosts cause a hard refusal — no TOFU.
+        ssh_known_hosts = normalize_none(config.get("SSH", "known_hosts", fallback=None))
+
         # S3 config
         s3_bucket = normalize_none(config.get("S3", "bucket", fallback=None))
         s3_prefix = normalize_none(config.get("S3", "prefix", fallback=None)) or ""
@@ -195,6 +199,31 @@ def extract_config_values(
         encryption_key_file = normalize_none(config.get("ENCRYPTION", "key_file", fallback=None))
         encryption_passphrase = normalize_none(config.get("ENCRYPTION", "passphrase", fallback=None))
         encryption_workers = config.getint("ENCRYPTION", "workers", fallback=1)
+        # KDF for passphrase-derived keys: 'pbkdf2' (default) or 'argon2id'.
+        # Argon2id is preferred but requires `pip install backup-handler[argon2]`.
+        # The KDF used for each file is recorded in its header, so this only
+        # affects newly written .enc files — existing files decrypt regardless.
+        encryption_kdf = normalize_none(config.get("ENCRYPTION", "kdf", fallback=None)) or "pbkdf2"
+        # Backend: 'aes' (symmetric, default) or 'qsafe' (hybrid post-quantum
+        # public-key via the Qsafe project). With qsafe, backups encrypt to the
+        # recipient public keys and only restore/verify need the secret key.
+        encryption_backend = (
+            normalize_none(config.get("ENCRYPTION", "backend", fallback=None)) or "aes"
+        ).lower()
+        encryption_qsafe_recipients = normalize_none(
+            config.get("ENCRYPTION", "qsafe_recipients", fallback=None)
+        )
+        encryption_qsafe_secret_key = normalize_none(
+            config.get("ENCRYPTION", "qsafe_secret_key", fallback=None)
+        )
+        # Manifest signing (ML-DSA-87 detached signatures via Qsafe). Orthogonal
+        # to the encryption backend: sign_key signs manifests at backup time,
+        # sign_pub verifies them during verify/restore.
+        encryption_qsafe_sign_key = normalize_none(config.get("ENCRYPTION", "qsafe_sign_key", fallback=None))
+        encryption_qsafe_sign_pub = normalize_none(config.get("ENCRYPTION", "qsafe_sign_pub", fallback=None))
+        encryption_qsafe_sign_passphrase = normalize_none(
+            config.get("ENCRYPTION", "qsafe_sign_passphrase", fallback=None)
+        )
 
         # Database config
         db_user = normalize_none(config.get("DATABASE", "user", fallback=None))
@@ -271,6 +300,7 @@ def extract_config_values(
             ),
             "ssh_username": raw_username,
             "ssh_password": raw_password,
+            "ssh_known_hosts": ssh_known_hosts,
             "schedule_times": (
                 [time.strip() for time in schedule_times.split(",") if time.strip()] if schedule_times else []
             ),
@@ -301,6 +331,13 @@ def extract_config_values(
             "encryption_key_file": encryption_key_file,
             "encryption_passphrase": encryption_passphrase,
             "encryption_workers": max(1, encryption_workers),
+            "encryption_kdf": encryption_kdf,
+            "encryption_backend": encryption_backend,
+            "encryption_qsafe_recipients": encryption_qsafe_recipients,
+            "encryption_qsafe_secret_key": encryption_qsafe_secret_key,
+            "encryption_qsafe_sign_key": encryption_qsafe_sign_key,
+            "encryption_qsafe_sign_pub": encryption_qsafe_sign_pub,
+            "encryption_qsafe_sign_passphrase": encryption_qsafe_sign_passphrase,
             "db_mode": config.getboolean("MODES", "db", fallback=False),
             "db_user": db_user,
             "db_password": db_password,
@@ -417,8 +454,15 @@ def extract_config_values(
 
             print("ENCRYPTION:")
             print(f"  Enabled    : {'Yes' if config_vars['encryption_enabled'] else 'No'}")
+            print(f"  Backend    : {config_vars['encryption_backend']}")
             print(f"  Key File   : {config_vars['encryption_key_file'] or 'Not Set'}")
             print(f"  Passphrase : {'*****' if config_vars['encryption_passphrase'] else 'Not Set'}")
+            if config_vars["encryption_backend"] == "qsafe":
+                print(f"  Recipients : {config_vars['encryption_qsafe_recipients'] or 'Not Set'}")
+                print(f"  Secret Key : {config_vars['encryption_qsafe_secret_key'] or 'Not Set'}")
+            if config_vars["encryption_qsafe_sign_key"] or config_vars["encryption_qsafe_sign_pub"]:
+                print(f"  Sign Key   : {config_vars['encryption_qsafe_sign_key'] or 'Not Set'}")
+                print(f"  Sign Pub   : {config_vars['encryption_qsafe_sign_pub'] or 'Not Set'}")
             print(f"  Workers    : {config_vars['encryption_workers']}\n")
 
             print("DATABASE:")
@@ -551,7 +595,7 @@ def validate_config(logger, config, require_schedule=False):
         if not normalize_none(config.get("S3", "region", fallback=None)):
             errors.append("Config error: 'region' is not set in [S3]. Required when s3 mode is enabled")
 
-    # Validate encryption: when enabled, require either key_file or passphrase
+    # Validate encryption: aes needs key_file or passphrase; qsafe needs recipients
     encryption_enabled = False
     try:
         encryption_enabled = config.getboolean("ENCRYPTION", "enabled", fallback=False)
@@ -559,12 +603,22 @@ def validate_config(logger, config, require_schedule=False):
         errors.append("Config error: 'enabled' in [ENCRYPTION] must be True or False")
 
     if encryption_enabled:
-        has_key_file = normalize_none(config.get("ENCRYPTION", "key_file", fallback=None))
-        has_passphrase = normalize_none(config.get("ENCRYPTION", "passphrase", fallback=None))
-        if not has_key_file and not has_passphrase:
-            errors.append(
-                "Config error: [ENCRYPTION] is enabled but neither 'key_file' nor 'passphrase' is set"
-            )
+        backend = (normalize_none(config.get("ENCRYPTION", "backend", fallback=None)) or "aes").lower()
+        if backend == "aes":
+            has_key_file = normalize_none(config.get("ENCRYPTION", "key_file", fallback=None))
+            has_passphrase = normalize_none(config.get("ENCRYPTION", "passphrase", fallback=None))
+            if not has_key_file and not has_passphrase:
+                errors.append(
+                    "Config error: [ENCRYPTION] is enabled but neither 'key_file' nor 'passphrase' is set"
+                )
+        elif backend == "qsafe":
+            if not normalize_none(config.get("ENCRYPTION", "qsafe_recipients", fallback=None)):
+                errors.append(
+                    "Config error: [ENCRYPTION] backend is 'qsafe' but 'qsafe_recipients' is not set. "
+                    "Provide at least one recipient public key path (comma-separated)."
+                )
+        else:
+            errors.append(f"Config error: [ENCRYPTION] backend must be 'aes' or 'qsafe', got '{backend}'")
 
     # Validate database fields only when MODES.db = True
     db_enabled = False

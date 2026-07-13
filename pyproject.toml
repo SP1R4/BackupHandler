@@ -25,31 +25,38 @@ classifiers = [
     "Topic :: Security :: Cryptography",
 ]
 dependencies = [
-    "boto3>=1.28.0",
+    "boto3>=1.34.0",
     "colorama>=0.4.6",
-    "cryptography>=43.0.0",
+    "cryptography>=45.0.0",
     "keyring>=25.0.0",
-    "paramiko>=3.4.0",
-    "pyminizip>=0.2.6",
-    "pyTelegramBotAPI>=4.22.0",
+    "paramiko>=3.5.0",
+    "pyzipper>=0.3.6",
+    "pyTelegramBotAPI>=4.27.0",
     "requests>=2.32.0",
     "retrying>=1.3.4",
     "tqdm>=4.66.0",
 ]
 
 [project.optional-dependencies]
+argon2 = [
+    "argon2-cffi>=23.1",
+]
 dev = [
     "black>=24.0",
     "ruff>=0.5",
     "mypy>=1.10",
     "types-requests",
     "types-paramiko",
+    "types-tqdm",
     "pre-commit>=3.7",
 ]
 test = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pytest-mock>=3.14",
+    # Exercises the Argon2id KDF paths (and keeps the AAD-downgrade test
+    # deterministic — without it the KDF flip fails on import, not on tag).
+    "argon2-cffi>=23.1",
 ]
 security = [
     "bandit>=1.7",
@@ -57,7 +64,7 @@ security = [
 ]
 
 [project.scripts]
-backup-handler = "main:main"
+backup-handler = "backup_handler.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/SP1R4/BackupHandler"
@@ -66,10 +73,12 @@ Issues = "https://github.com/SP1R4/BackupHandler/issues"
 Changelog = "https://github.com/SP1R4/BackupHandler/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
-path = "src/__version__.py"
+path = "src/backup_handler/__version__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/backup_handler"]
+# Bundle non-Python data (bot help text, etc.).
+include = ["src/backup_handler/bot/help/*"]
 
 # ─── Ruff ───────────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -78,10 +87,7 @@ target-version = "py310"
 extend-exclude = [
     "venv",
     "skili",
-    "banner",
-    "bot",
     "db_backup",
-    "email_nots",
     "BackupTimestamp",
     "snapshots",
     "Logs",
@@ -110,8 +116,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S311", "N802"]
+# S103/S108: tests deliberately create world-writable files and /tmp path
+# strings to exercise the hardening code that rejects them.
+"tests/**" = ["S101", "S103", "S105", "S106", "S108", "S311", "N802"]
 "src/test.py" = ["ALL"]
+# Pre-src-layout module name kept for the public import path.
+"src/backup_handler/bot/BotHandler.py" = ["N999"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -126,10 +136,7 @@ extend-exclude = '''
   \.git
   | venv
   | skili
-  | banner
-  | bot
   | db_backup
-  | email_nots
   | snapshots
   | Logs
   | BackupTimestamp
@@ -149,10 +156,7 @@ strict_equality = true
 exclude = [
     "venv/",
     "skili/",
-    "banner/",
-    "bot/",
     "db_backup/",
-    "email_nots/",
     "snapshots/",
     "Logs/",
     "BackupTimestamp/",
@@ -161,12 +165,32 @@ exclude = [
 [[tool.mypy.overrides]]
 module = [
     "paramiko.*",
-    "pyminizip.*",
+    "pyzipper.*",
     "telebot.*",
     "keyring.*",
     "retrying.*",
+    "argon2.*",
+    "boto3.*",
+    "botocore.*",
+    "qsafe",
 ]
 ignore_missing_imports = true
+
+# Strict mode on the leaf modules — small, well-isolated, easy to keep clean.
+# Add modules here as they become type-safe; do not remove from this list.
+[[tool.mypy.overrides]]
+module = [
+    "backup_handler._paths",
+    "backup_handler.encryption",
+    "backup_handler.lock",
+    "backup_handler.manifest",
+    "backup_handler.qsafe_backend",
+    "backup_handler.ssh_client",
+    "backup_handler.status",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_no_return = true
 
 # ─── Pytest ─────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
@@ -187,7 +211,7 @@ markers = [
 # ─── Coverage ───────────────────────────────────────────────────────────────
 [tool.coverage.run]
 branch = true
-source = ["src"]
+source = ["backup_handler"]
 omit = [
     "*/tests/*",
     "*/venv/*",
@@ -195,6 +219,11 @@ omit = [
 ]
 
 [tool.coverage.report]
+# Floor below current coverage so CI fails when coverage regresses.
+# Raise as coverage grows; do not lower without discussion. The current
+# baseline reflects the orchestrator/snapshot/restore modules being
+# entirely untested — they're the next units worth covering.
+fail_under = 25
 precision = 1
 show_missing = true
 skip_covered = false
@@ -207,7 +236,7 @@ exclude_lines = [
 
 # ─── Bandit ─────────────────────────────────────────────────────────────────
 [tool.bandit]
-exclude_dirs = ["tests", "venv", "skili", "banner", "bot", "db_backup", "email_nots"]
+exclude_dirs = ["tests", "venv", "skili", "db_backup"]
 skips = [
     "B101",  # assert_used — fine in tests
     "B404",  # subprocess import — audited usage

@@ -1,14 +1,16 @@
-import os
-import json
-import time
-import telebot
 import configparser
-from pathlib import Path as _Path
-from threading import Thread, Event
+import json
+import os
+import time
+from threading import Event, Thread
 
+import telebot
 
-CONFIG_FILE = str(_Path(__file__).parent.parent / 'config' / 'bot_config.ini')
-_RUNTIME_USERS_FILE = str(_Path(__file__).parent.parent / 'config' / '.bot_users.json')
+from .._paths import CONFIG_DIR
+
+CONFIG_FILE = str(CONFIG_DIR / "bot_config.ini")
+_RUNTIME_USERS_FILE = str(CONFIG_DIR / ".bot_users.json")
+
 
 class TelegramBot:
     def __init__(self, logger):
@@ -21,8 +23,8 @@ class TelegramBot:
             config.read(CONFIG_FILE)
         else:
             raise FileNotFoundError(f"Configuration file '{CONFIG_FILE}' not found.")
-        self.api_token = config['TELEGRAM']['api_token']
-        self._config_user_ids = config['USERS']['interacted_users']
+        self.api_token = config["TELEGRAM"]["api_token"]
+        self._config_user_ids = config["USERS"]["interacted_users"]
         self.bot = telebot.TeleBot(self.api_token)
         self.interacted_users = []
         self.polling_thread = None
@@ -35,6 +37,7 @@ class TelegramBot:
         """
         Sets up message handlers for the bot to respond to incoming messages.
         """
+
         @self.bot.message_handler(func=lambda message: True)
         def handle_any_message(message):
             user_id = message.chat.id
@@ -51,13 +54,17 @@ class TelegramBot:
             chat = self.bot.get_chat(user_id)
             return chat.username if chat.username else None
         except telebot.apihelper.ApiTelegramException as e:
-            self.logger.error(f"Telegram API error occurred while retrieving username for user ID {user_id}: {e}")
+            self.logger.error(
+                f"Telegram API error occurred while retrieving username for user ID {user_id}: {e}"
+            )
             return None
         except telebot.apihelper.ApiException as e:
             self.logger.error(f"API error occurred while retrieving username for user ID {user_id}: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Unexpected error occurred while retrieving username for user ID {user_id}: {e}")
+            self.logger.error(
+                f"Unexpected error occurred while retrieving username for user ID {user_id}: {e}"
+            )
             return None
 
     def load_interacted_users(self):
@@ -68,16 +75,16 @@ class TelegramBot:
         # Try runtime file first
         if os.path.exists(_RUNTIME_USERS_FILE):
             try:
-                with open(_RUNTIME_USERS_FILE, 'r') as f:
+                with open(_RUNTIME_USERS_FILE) as f:
                     data = json.load(f)
-                self.interacted_users = data.get('user_ids', [])
+                self.interacted_users = data.get("user_ids", [])
                 return
             except (json.JSONDecodeError, OSError) as e:
                 self.logger.warning(f"Failed to read runtime users file: {e}")
 
         # Fall back to config values
         if self._config_user_ids:
-            self.interacted_users = [int(uid) for uid in self._config_user_ids.split(',') if uid.strip()]
+            self.interacted_users = [int(uid) for uid in self._config_user_ids.split(",") if uid.strip()]
         else:
             self.interacted_users = []
 
@@ -87,8 +94,8 @@ class TelegramBot:
         Does not modify bot_config.ini.
         """
         try:
-            with open(_RUNTIME_USERS_FILE, 'w') as f:
-                json.dump({'user_ids': self.interacted_users}, f)
+            with open(_RUNTIME_USERS_FILE, "w") as f:
+                json.dump({"user_ids": self.interacted_users}, f)
         except OSError as e:
             self.logger.error(f"Failed to save runtime users file: {e}")
 
@@ -125,7 +132,7 @@ class TelegramBot:
             return
         for user_id in self.interacted_users:
             try:
-                with open(file_path, 'rb') as f:
+                with open(file_path, "rb") as f:
                     self.bot.send_photo(user_id, photo=f, caption=caption)
                 self.logger.info(f"Image sent to {self.get_username(user_id)}")
             except telebot.apihelper.ApiTelegramException as e:
@@ -143,8 +150,12 @@ class TelegramBot:
             return
         for user_id in self.interacted_users:
             try:
-                self.bot.send_location(user_id, latitude=latitude, longitude=longitude, live_period=live_period)
-                self.logger.info(f"Geolocation sent to user ID {user_id}: Latitude {latitude}, Longitude {longitude}")
+                self.bot.send_location(
+                    user_id, latitude=latitude, longitude=longitude, live_period=live_period
+                )
+                self.logger.info(
+                    f"Geolocation sent to user ID {user_id}: Latitude {latitude}, Longitude {longitude}"
+                )
             except telebot.apihelper.ApiTelegramException as e:
                 self.logger.error(f"Telegram API error sending geolocation to user {user_id}: {e}")
             except telebot.apihelper.ApiException as e:
@@ -163,10 +174,10 @@ class TelegramBot:
             try:
                 if document is not None:
                     self.bot.send_document(user_id, document=document, caption=caption)
-                    if hasattr(document, 'seek'):
+                    if hasattr(document, "seek"):
                         document.seek(0)
                 elif file_path is not None:
-                    with open(file_path, 'rb') as f:
+                    with open(file_path, "rb") as f:
                         self.bot.send_document(user_id, document=f, caption=caption)
                 else:
                     self.logger.error("send_document called with no file_path or document")

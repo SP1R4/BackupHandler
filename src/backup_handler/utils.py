@@ -20,10 +20,10 @@ from pathlib import Path
 
 import keyring
 
-# Define file paths for storing timestamps of backups (absolute, relative to project root)
-_PROJECT_ROOT = Path(__file__).parent.parent
-TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "backup_timestamp.json"
-FULL_BACKUP_TIMESTAMP_FILE = _PROJECT_ROOT / "BackupTimestamp" / "full_backup_timestamp.json"
+from ._paths import TIMESTAMP_DIR
+
+TIMESTAMP_FILE = TIMESTAMP_DIR / "backup_timestamp.json"
+FULL_BACKUP_TIMESTAMP_FILE = TIMESTAMP_DIR / "full_backup_timestamp.json"
 
 
 def should_exclude(file_path: os.PathLike | str, patterns: Iterable[str] | None) -> bool:
@@ -55,6 +55,36 @@ def should_exclude(file_path: os.PathLike | str, patterns: Iterable[str] | None)
     return False
 
 
+def assert_config_safe_for_hooks(logger, config_path: str | os.PathLike) -> None:
+    """
+    Verify that the config file is safe to use as the source of shell hooks.
+
+    Hooks execute via ``shell=True`` so the config file is the trust boundary.
+    If the file is group/world-writable, *any* local user could inject a hook
+    command into our process. Refuse to run hooks in that case.
+
+    Set ``BACKUP_HANDLER_TRUST_CONFIG=1`` to bypass this check for unusual
+    installs (e.g., Docker volumes with permissive defaults).
+    """
+    if os.environ.get("BACKUP_HANDLER_TRUST_CONFIG") == "1":
+        return
+    try:
+        st = os.stat(config_path)
+    except OSError as e:
+        raise RuntimeError(f"Cannot stat config file {config_path}: {e}") from e
+    # 0o022 mask = group-write or other-write bits.
+    if st.st_mode & 0o022:
+        raise PermissionError(
+            f"Refusing to run hooks: config file {config_path} is writable by "
+            f"group or other (mode {st.st_mode & 0o777:o}). Hooks execute via "
+            f"shell=True, so a non-root writer could inject commands. "
+            f"Run: chmod 600 {config_path}  "
+            f"(or set BACKUP_HANDLER_TRUST_CONFIG=1 to override)."
+        )
+    if logger:
+        logger.debug(f"Config file {config_path} mode {st.st_mode & 0o777:o} — safe for hooks")
+
+
 def run_hook(logger, command: str | None, hook_name: str) -> bool:
     """
     Execute a pre/post backup hook command.
@@ -73,8 +103,8 @@ def run_hook(logger, command: str | None, hook_name: str) -> bool:
     try:
         # shell=True is intentional — hooks are user-supplied commands from
         # config.ini that may legitimately contain pipes, redirects, or env
-        # expansion. The config file itself is the trust boundary (root-owned,
-        # not user input), so treating its contents as code is expected.
+        # expansion. The config file is the trust boundary; call
+        # assert_config_safe_for_hooks() before invoking any hooks.
         result = subprocess.run(  # noqa: S602  # nosec B602
             command,
             shell=True,
@@ -129,21 +159,32 @@ def get_last_backup_time() -> int:
     if TIMESTAMP_FILE.exists():
         with open(TIMESTAMP_FILE) as f:
             data = json.load(f)
-        return data.get("last_backup_time", 0)
+        return int(data.get("last_backup_time", 0))
     else:
         return 0  # Default to epoch if no backup has been performed
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON to a temp file, fsync, then rename onto the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(data).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
 
 
 def update_last_backup_time() -> None:
     """
     Update the timestamp of the last incremental backup.
 
-    This function writes the current time (in seconds since epoch) to the JSON file.
+    Written atomically (temp + fsync + rename) so a concurrent reader or
+    a power-cut never sees a half-written timestamp file.
     """
-    TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = {"last_backup_time": int(time.time())}
-    with open(TIMESTAMP_FILE, "w") as f:
-        json.dump(data, f)
+    _atomic_write_json(TIMESTAMP_FILE, {"last_backup_time": int(time.time())})
 
 
 def get_last_full_backup_time() -> int:
@@ -158,21 +199,14 @@ def get_last_full_backup_time() -> int:
     if FULL_BACKUP_TIMESTAMP_FILE.exists():
         with open(FULL_BACKUP_TIMESTAMP_FILE) as f:
             data = json.load(f)
-        return data.get("last_full_backup_time", 0)
+        return int(data.get("last_full_backup_time", 0))
     else:
         return 0  # Default to epoch if no full backup has been performed
 
 
 def update_last_full_backup_time() -> None:
-    """
-    Update the timestamp of the last full backup.
-
-    This function writes the current time (in seconds since epoch) to the JSON file.
-    """
-    FULL_BACKUP_TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = {"last_full_backup_time": int(time.time())}
-    with open(FULL_BACKUP_TIMESTAMP_FILE, "w") as f:
-        json.dump(data, f)
+    """Update the timestamp of the last full backup (atomic, see update_last_backup_time)."""
+    _atomic_write_json(FULL_BACKUP_TIMESTAMP_FILE, {"last_full_backup_time": int(time.time())})
 
 
 def calculate_checksum(file_path: os.PathLike | str, logger=None) -> str | None:
@@ -223,7 +257,7 @@ def _get_backup_checksums(backup: os.PathLike | str) -> dict[str, str]:
     - dict: A dictionary where keys are file paths and values are their SHA-256 checksums.
     """
     checksums = {}
-    for root, _dirs, files in os.walk(backup):
+    for root, _dirs, files in os.walk(str(backup)):
         for file_name in files:
             file_path = os.path.join(root, file_name)
             checksum = calculate_checksum(file_path)

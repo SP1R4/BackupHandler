@@ -25,12 +25,12 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-# Make `src.*` importable when run from the project root.
+# src-layout: make `backup_handler.*` importable when run from the project root.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from src import preflight  # noqa: E402
-from src.preflight import (  # noqa: E402
+from backup_handler import preflight  # noqa: E402
+from backup_handler.preflight import (  # noqa: E402
     PreflightConfig,
     read_status_sentinel,
     run_preflight,

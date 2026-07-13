@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import string
+import sys
 
-from src.utils import generate_otp, is_valid_email, should_exclude
+import pytest
+
+from backup_handler.utils import (
+    assert_config_safe_for_hooks,
+    generate_otp,
+    is_valid_email,
+    should_exclude,
+)
 
 
 class TestGenerateOTP:
@@ -51,3 +60,33 @@ class TestShouldExclude:
 
     def test_no_match(self):
         assert should_exclude("data.txt", ["*.log", "*.tmp"]) is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+class TestAssertConfigSafeForHooks:
+    def test_accepts_mode_600(self, tmp_dir, logger):
+        cfg = tmp_dir / "config.ini"
+        cfg.write_text("[X]\n")
+        os.chmod(cfg, 0o600)
+        assert_config_safe_for_hooks(logger, cfg)  # no raise
+
+    def test_rejects_world_writable(self, tmp_dir, logger):
+        cfg = tmp_dir / "config.ini"
+        cfg.write_text("[X]\n")
+        os.chmod(cfg, 0o606)
+        with pytest.raises(PermissionError, match="writable by"):
+            assert_config_safe_for_hooks(logger, cfg)
+
+    def test_rejects_group_writable(self, tmp_dir, logger):
+        cfg = tmp_dir / "config.ini"
+        cfg.write_text("[X]\n")
+        os.chmod(cfg, 0o660)
+        with pytest.raises(PermissionError, match="writable by"):
+            assert_config_safe_for_hooks(logger, cfg)
+
+    def test_trust_env_overrides(self, tmp_dir, logger, monkeypatch):
+        cfg = tmp_dir / "config.ini"
+        cfg.write_text("[X]\n")
+        os.chmod(cfg, 0o666)
+        monkeypatch.setenv("BACKUP_HANDLER_TRUST_CONFIG", "1")
+        assert_config_safe_for_hooks(logger, cfg)  # no raise
