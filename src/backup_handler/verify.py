@@ -17,11 +17,18 @@ import tempfile
 from pathlib import Path
 
 from .encryption import decrypt_file
-from .manifest import load_latest_manifest
+from .manifest import latest_manifest_path, load_latest_manifest, manifest_signature_status
 from .utils import calculate_checksum
 
 
-def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, encryption_key_file=None):
+def verify_backup_integrity(
+    logger,
+    backup_dirs,
+    encryption_passphrase=None,
+    encryption_key_file=None,
+    qsafe_secret_key=None,
+    qsafe_sign_pub=None,
+):
     """
     Verify backup integrity by checking file existence and SHA-256 checksums
     against the latest manifest in each backup directory.
@@ -29,8 +36,14 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
     Parameters:
     - logger: Logger instance.
     - backup_dirs (list): List of backup directory paths to verify.
-    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files.
+    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files
+      (for Qsafe backups, this unwraps the secret key).
     - encryption_key_file (str, optional): Path to key file for decrypting .enc files.
+    - qsafe_secret_key (str, optional): Path to the Qsafe secret key for decrypting
+      Qsafe-encrypted .enc files.
+    - qsafe_sign_pub (str, optional): Path to the Qsafe signing public key. When
+      set, each directory's latest manifest signature is checked before its
+      contents are trusted; an invalid signature marks the manifest corrupted.
 
     Returns:
     - dict: Summary with keys 'total', 'verified', 'missing', 'corrupted', 'errors',
@@ -73,6 +86,24 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
             continue
 
         dir_result["manifest_found"] = True
+
+        # Authenticate the manifest before trusting its contents
+        if qsafe_sign_pub:
+            manifest_file = latest_manifest_path(bdir)
+            sig_status = manifest_signature_status(manifest_file, qsafe_sign_pub)
+            if sig_status == "invalid":
+                logger.error(f"Manifest signature INVALID for {manifest_file} — not trusting it.")
+                dir_result["corrupted"] += 1
+                results["corrupted"] += 1
+                dir_result["details"].append(f"MANIFEST SIGNATURE INVALID: {manifest_file.name}")
+                results["directories"][bdir] = dir_result
+                continue
+            if sig_status == "missing":
+                logger.warning(f"No signature for {manifest_file} (backup made before signing was enabled?)")
+                dir_result["details"].append(f"Manifest unsigned: {manifest_file.name}")
+            else:
+                dir_result["details"].append(f"Manifest signature OK (ML-DSA-87): {manifest_file.name}")
+
         copied_entries = manifest.get("copied", [])
         logger.info(f"Verifying {len(copied_entries)} files from manifest in {bdir}")
 
@@ -88,7 +119,7 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
             if candidate is None:
                 # Check for encrypted version
                 enc_candidate = _find_encrypted_file(bpath, file_path)
-                if enc_candidate and (encryption_passphrase or encryption_key_file):
+                if enc_candidate and (encryption_passphrase or encryption_key_file or qsafe_secret_key):
                     # Decrypt to temp file for verification
                     ok = _verify_encrypted_file(
                         logger,
@@ -97,6 +128,7 @@ def verify_backup_integrity(logger, backup_dirs, encryption_passphrase=None, enc
                         encryption_passphrase,
                         encryption_key_file,
                         dir_result,
+                        qsafe_secret_key=qsafe_secret_key,
                     )
                     if ok:
                         results["verified"] += 1
@@ -237,7 +269,9 @@ def _find_encrypted_file(backup_dir, original_path):
     return best_match
 
 
-def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file, dir_result):
+def _verify_encrypted_file(
+    logger, enc_path, expected_size, passphrase, key_file, dir_result, qsafe_secret_key=None
+):
     """
     Decrypt an encrypted file to a temporary directory and verify its size.
 
@@ -251,6 +285,7 @@ def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file
         passphrase (str): Encryption passphrase (or None).
         key_file (str): Path to encryption key file (or None).
         dir_result (dict): Per-directory result dict to update counters.
+        qsafe_secret_key (str): Path to the Qsafe secret key (or None).
 
     Returns:
         bool: True if size matches, False otherwise.
@@ -260,7 +295,9 @@ def _verify_encrypted_file(logger, enc_path, expected_size, passphrase, key_file
             tmp_enc = Path(tmp_dir) / enc_path.name
             # Copy enc file to temp to avoid modifying original
             tmp_enc.write_bytes(enc_path.read_bytes())
-            decrypted = decrypt_file(tmp_enc, passphrase=passphrase, key_file=key_file)
+            decrypted = decrypt_file(
+                tmp_enc, passphrase=passphrase, key_file=key_file, qsafe_secret_key=qsafe_secret_key
+            )
             actual_size = decrypted.stat().st_size
             if actual_size != expected_size:
                 logger.warning(

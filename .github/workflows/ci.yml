@@ -70,6 +70,7 @@ jobs:
             src/backup_handler/encryption.py \
             src/backup_handler/lock.py \
             src/backup_handler/manifest.py \
+            src/backup_handler/qsafe_backend.py \
             src/backup_handler/ssh_client.py \
             src/backup_handler/status.py
 

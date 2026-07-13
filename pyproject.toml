@@ -164,6 +164,7 @@ module = [
     "argon2.*",
     "boto3.*",
     "botocore.*",
+    "qsafe",
 ]
 ignore_missing_imports = true
 
@@ -175,6 +176,7 @@ module = [
     "backup_handler.encryption",
     "backup_handler.lock",
     "backup_handler.manifest",
+    "backup_handler.qsafe_backend",
     "backup_handler.ssh_client",
     "backup_handler.status",
 ]

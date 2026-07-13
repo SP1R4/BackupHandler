@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import qsafe_backend
+
 # Manifest filenames must match exactly: backup_manifest_YYYYMMDD_HHMMSS.json
 # Anything else (truncated names, foreign files) is ignored when sorting.
 _MANIFEST_RE = re.compile(r"^backup_manifest_(\d{8}_\d{6})\.json$")
@@ -126,16 +128,37 @@ class BackupManifest:
         }
 
 
-def load_latest_manifest(directory: Path | str) -> dict[str, Any] | None:
-    """Load the most recent backup manifest from a directory, or None."""
-    directory = Path(directory)
-    matches = _valid_manifests(directory)
+def latest_manifest_path(directory: Path | str) -> Path | None:
+    """Return the path of the most recent backup manifest, or None."""
+    matches = _valid_manifests(Path(directory))
     if not matches:
         return None
     matches.sort(reverse=True)  # lexicographic on YYYYMMDD_HHMMSS == chronological
-    _, latest_path = matches[0]
+    return matches[0][1]
+
+
+def load_latest_manifest(directory: Path | str) -> dict[str, Any] | None:
+    """Load the most recent backup manifest from a directory, or None."""
+    latest_path = latest_manifest_path(directory)
+    if latest_path is None:
+        return None
     with open(latest_path) as f:
-        return json.load(f)
+        data: dict[str, Any] = json.load(f)
+    return data
+
+
+def manifest_signature_status(manifest_path: Path | str, sign_public_key: str) -> str:
+    """
+    Check the detached Qsafe (ML-DSA-87) signature for a manifest file.
+
+    Returns 'valid', 'invalid', or 'missing' (no ``.sig`` alongside — normal
+    for backups made before signing was enabled).
+    """
+    sig_path = Path(str(manifest_path) + ".sig")
+    if not sig_path.exists():
+        return "missing"
+    ok = qsafe_backend.verify_signature_file(manifest_path, sig_path, sign_public_key)
+    return "valid" if ok else "invalid"
 
 
 def load_manifests_up_to(directory: Path | str, timestamp: str) -> list[dict[str, Any]]:

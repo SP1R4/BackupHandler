@@ -21,6 +21,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import qsafe_backend
 from ._paths import CONFIG_DIR, PROJECT_ROOT
 from .bot.BotHandler import TelegramBot
 from .config import extract_config_values
@@ -790,8 +791,17 @@ def backup_operation(
         # Show encryption info in dry-run
         dry_encrypt = encrypt or config_values.get("encryption_enabled", False)
         if dry_encrypt:
-            enc_method = "key_file" if config_values.get("encryption_key_file") else "passphrase"
-            print(f"[DRY RUN] Would encrypt backup files using AES-256-GCM ({enc_method})")
+            if config_values.get("encryption_backend", "aes") == "qsafe":
+                recipients = qsafe_backend.parse_recipients(config_values.get("encryption_qsafe_recipients"))
+                print(
+                    f"[DRY RUN] Would encrypt backup files using Qsafe post-quantum "
+                    f"hybrid encryption (X25519 + ML-KEM-1024, {len(recipients)} recipient(s))"
+                )
+            else:
+                enc_method = "key_file" if config_values.get("encryption_key_file") else "passphrase"
+                print(f"[DRY RUN] Would encrypt backup files using AES-256-GCM ({enc_method})")
+        if config_values.get("encryption_qsafe_sign_key"):
+            print("[DRY RUN] Would sign backup manifests with ML-DSA-87 (Qsafe)")
         dry_dedup = dedup or config_values.get("dedup_enabled", False)
         if dry_dedup:
             print("[DRY RUN] Would deduplicate identical files using hardlinks")
@@ -799,7 +809,9 @@ def backup_operation(
         print("\n[DRY RUN] Complete. No files were modified.")
         return 0
 
-    # Save manifest to each backup directory
+    # Save manifest to each backup directory (and sign it if configured)
+    sign_key = config_values.get("encryption_qsafe_sign_key")
+    sign_passphrase = config_values.get("encryption_qsafe_sign_passphrase")
     if backup_dirs:
         for bdir in backup_dirs:
             try:
@@ -807,6 +819,14 @@ def backup_operation(
                 logger.info(f"Backup manifest saved to {manifest_path}")
             except Exception as e:
                 logger.error(f"Failed to save manifest to {bdir}: {e}")
+                continue
+            if sign_key:
+                try:
+                    sig_path = str(manifest_path) + ".sig"
+                    qsafe_backend.sign_file(manifest_path, sig_path, sign_key, sign_passphrase)
+                    logger.info(f"Manifest signed (ML-DSA-87): {sig_path}")
+                except Exception as e:
+                    logger.error(f"Failed to sign manifest {manifest_path}: {e}")
 
     # Warn about compression + encryption interaction
     if compress and compress != "none":
@@ -820,13 +840,17 @@ def backup_operation(
 
     # Encrypt backup files (after manifest save, before retention)
     encryption_enabled = encrypt or config_values.get("encryption_enabled", False)
+    enc_backend = config_values.get("encryption_backend", "aes")
     enc_passphrase = config_values.get("encryption_passphrase")
     enc_key_file = config_values.get("encryption_key_file")
+    enc_recipients = qsafe_backend.parse_recipients(config_values.get("encryption_qsafe_recipients"))
 
     enc_workers = config_values.get("encryption_workers", 1)
 
     if encryption_enabled and backup_dirs:
-        if not enc_passphrase and not enc_key_file:
+        if enc_backend == "qsafe" and not enc_recipients:
+            logger.error("Qsafe encryption enabled but no qsafe_recipients configured in [ENCRYPTION].")
+        elif enc_backend != "qsafe" and not enc_passphrase and not enc_key_file:
             logger.error("Encryption enabled but no passphrase or key_file configured in [ENCRYPTION].")
         else:
             for bdir in backup_dirs:
@@ -838,6 +862,8 @@ def backup_operation(
                         logger=logger,
                         workers=enc_workers,
                         kdf=config_values.get("encryption_kdf", "pbkdf2"),
+                        backend=enc_backend,
+                        qsafe_recipients=enc_recipients,
                     )
                     logger.info(f"Encrypted {count} files in {bdir}")
                 except Exception as e:

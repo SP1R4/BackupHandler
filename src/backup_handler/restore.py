@@ -21,7 +21,7 @@ import zipfile
 from pathlib import Path
 
 from .encryption import decrypt_directory
-from .manifest import load_manifests_up_to
+from .manifest import load_manifests_up_to, manifest_signature_status
 from .ssh_client import build_ssh_client, explain_host_key_failure
 from .utils import verify_backup
 
@@ -235,6 +235,8 @@ def restore_backup(
     timestamp=None,
     encryption_passphrase=None,
     encryption_key_file=None,
+    qsafe_secret_key=None,
+    qsafe_sign_pub=None,
     ssh_password=None,
     s3_region=None,
     s3_access_key=None,
@@ -250,8 +252,14 @@ def restore_backup(
     - from_dir (str): Source — local path, user@host:/path, or s3://bucket/prefix.
     - to_dir (str): Destination directory to restore files to.
     - timestamp (str, optional): Restore to a specific point in time (YYYYMMDD_HHMMSS).
-    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files.
+    - encryption_passphrase (str, optional): Passphrase for decrypting .enc files
+      (for Qsafe backups, this unwraps the secret key).
     - encryption_key_file (str, optional): Path to key file for decrypting .enc files.
+    - qsafe_secret_key (str, optional): Path to the Qsafe secret key for decrypting
+      Qsafe-encrypted .enc files.
+    - qsafe_sign_pub (str, optional): Path to the Qsafe signing public key. When
+      set, manifests used for point-in-time restore must carry a valid ML-DSA-87
+      signature — an invalid signature aborts the restore.
     - ssh_password (str, optional): SSH password for remote restore.
     - s3_region (str, optional): AWS region for S3 restore.
     - s3_access_key (str, optional): AWS access key for S3 restore.
@@ -280,7 +288,14 @@ def restore_backup(
             ):
                 return False
             return _restore_local(
-                logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file
+                logger,
+                Path(tmp_dir),
+                to_path,
+                timestamp,
+                encryption_passphrase,
+                encryption_key_file,
+                qsafe_secret_key,
+                qsafe_sign_pub,
             )
 
     # Remote S3 restore
@@ -296,7 +311,14 @@ def restore_backup(
             ):
                 return False
             return _restore_local(
-                logger, Path(tmp_dir), to_path, timestamp, encryption_passphrase, encryption_key_file
+                logger,
+                Path(tmp_dir),
+                to_path,
+                timestamp,
+                encryption_passphrase,
+                encryption_key_file,
+                qsafe_secret_key,
+                qsafe_sign_pub,
             )
 
     # Local restore
@@ -315,7 +337,7 @@ def restore_backup(
     if from_path.is_dir():
         # Check if backup contains encrypted files
         has_enc_files = any(from_path.rglob("*.enc"))
-        if has_enc_files and (encryption_passphrase or encryption_key_file):
+        if has_enc_files and (encryption_passphrase or encryption_key_file or qsafe_secret_key):
             logger.info("Encrypted files detected. Decrypting to temporary directory before restore.")
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_path = Path(tmp_dir)
@@ -323,10 +345,16 @@ def restore_backup(
                 shutil.copytree(from_path, tmp_path / "backup", dirs_exist_ok=True)
                 decrypt_dir = tmp_path / "backup"
                 decrypt_directory(
-                    decrypt_dir, passphrase=encryption_passphrase, key_file=encryption_key_file, logger=logger
+                    decrypt_dir,
+                    passphrase=encryption_passphrase,
+                    key_file=encryption_key_file,
+                    qsafe_secret_key=qsafe_secret_key,
+                    logger=logger,
                 )
                 if timestamp:
-                    return _restore_with_manifests(logger, decrypt_dir, to_path, timestamp)
+                    return _restore_with_manifests(
+                        logger, decrypt_dir, to_path, timestamp, qsafe_sign_pub=qsafe_sign_pub
+                    )
                 else:
                     return _restore_full_directory(logger, decrypt_dir, to_path)
         elif has_enc_files:
@@ -336,7 +364,9 @@ def restore_backup(
             )
 
         if timestamp:
-            return _restore_with_manifests(logger, from_path, to_path, timestamp)
+            return _restore_with_manifests(
+                logger, from_path, to_path, timestamp, qsafe_sign_pub=qsafe_sign_pub
+            )
         else:
             return _restore_full_directory(logger, from_path, to_path)
 
@@ -383,7 +413,16 @@ def _dry_run_restore(logger, from_dir, to_dir, timestamp):
 # ─── Local Restore Handlers ─────────────────────────────────────────────────
 
 
-def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase, encryption_key_file):
+def _restore_local(
+    logger,
+    from_path,
+    to_path,
+    timestamp,
+    encryption_passphrase,
+    encryption_key_file,
+    qsafe_secret_key=None,
+    qsafe_sign_pub=None,
+):
     """
     Perform a local restore with automatic encrypted file detection.
 
@@ -393,16 +432,20 @@ def _restore_local(logger, from_path, to_path, timestamp, encryption_passphrase,
     manifest-based restore.
     """
     has_enc_files = any(from_path.rglob("*.enc"))
-    if has_enc_files and (encryption_passphrase or encryption_key_file):
+    if has_enc_files and (encryption_passphrase or encryption_key_file or qsafe_secret_key):
         logger.info("Encrypted files detected in downloaded backup. Decrypting before restore.")
         decrypt_directory(
-            from_path, passphrase=encryption_passphrase, key_file=encryption_key_file, logger=logger
+            from_path,
+            passphrase=encryption_passphrase,
+            key_file=encryption_key_file,
+            qsafe_secret_key=qsafe_secret_key,
+            logger=logger,
         )
     elif has_enc_files:
         logger.warning("Encrypted files detected but no encryption credentials. Files will be copied as-is.")
 
     if timestamp:
-        return _restore_with_manifests(logger, from_path, to_path, timestamp)
+        return _restore_with_manifests(logger, from_path, to_path, timestamp, qsafe_sign_pub=qsafe_sign_pub)
     else:
         return _restore_full_directory(logger, from_path, to_path)
 
@@ -490,7 +533,7 @@ def _restore_full_directory(logger, from_dir, to_dir):
     return failed == 0
 
 
-def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
+def _restore_with_manifests(logger, from_dir, to_dir, timestamp, qsafe_sign_pub=None):
     """
     Restore files to a specific point in time using manifest history.
 
@@ -504,6 +547,9 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
         from_dir (Path): Source backup directory containing manifests.
         to_dir (Path): Destination restore directory.
         timestamp (str): Cutoff timestamp in YYYYMMDD_HHMMSS format.
+        qsafe_sign_pub (str, optional): Qsafe signing public key. When set,
+            an invalid manifest signature aborts the restore; a missing one
+            only warns (pre-signing backups).
 
     Returns:
         bool: True if all files were restored without errors.
@@ -516,6 +562,20 @@ def _restore_with_manifests(logger, from_dir, to_dir, timestamp):
             f"No manifests found up to timestamp {timestamp}. Falling back to full directory restore."
         )
         return _restore_full_directory(logger, from_dir, to_dir)
+
+    # Authenticate every manifest before replaying it
+    if qsafe_sign_pub:
+        for m in manifests:
+            manifest_file = m.get("_manifest_path", "")
+            status = manifest_signature_status(manifest_file, qsafe_sign_pub)
+            if status == "invalid":
+                logger.error(
+                    f"Manifest signature INVALID: {manifest_file}. "
+                    "Aborting restore — the manifest may have been tampered with."
+                )
+                return False
+            if status == "missing":
+                logger.warning(f"No signature for {manifest_file} (pre-signing backup?). Proceeding.")
 
     logger.info(f"Found {len(manifests)} manifest(s) to apply")
 

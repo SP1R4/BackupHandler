@@ -56,6 +56,8 @@ def handle_verify(logger, args, config_path: str) -> int:
         backup_dirs,
         encryption_passphrase=verify_config.get("encryption_passphrase"),
         encryption_key_file=verify_config.get("encryption_key_file"),
+        qsafe_secret_key=verify_config.get("encryption_qsafe_secret_key"),
+        qsafe_sign_pub=verify_config.get("encryption_qsafe_sign_pub"),
     )
     return 0 if print_verify_report(results) else 1
 
@@ -144,6 +146,8 @@ def handle_restore(logger, args, config_path: str) -> int:
         timestamp=args.restore_timestamp,
         encryption_passphrase=restore_config.get("encryption_passphrase"),
         encryption_key_file=restore_config.get("encryption_key_file"),
+        qsafe_secret_key=restore_config.get("encryption_qsafe_secret_key"),
+        qsafe_sign_pub=restore_config.get("encryption_qsafe_sign_pub"),
         ssh_password=restore_config.get("ssh_password"),
         s3_region=restore_config.get("s3_region"),
         s3_access_key=restore_config.get("s3_access_key"),

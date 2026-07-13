@@ -1,26 +1,33 @@
 """
-encryption.py - AES-256-GCM Encryption at Rest
+encryption.py - Encryption at Rest (AES-256-GCM and Qsafe backends)
 
-Provides file-level encryption and decryption for backup data using
-AES-256-GCM authenticated encryption.
+Provides file-level encryption and decryption for backup data.
 
-Key sources (KDF identifiers):
+Two backends share the ``.enc`` extension and are distinguished by magic
+bytes on decrypt:
+
+aes (default) — symmetric AES-256-GCM. Key sources (KDF identifiers):
     0x00 raw key file   - 32 random bytes read directly from disk.
     0x01 PBKDF2-HMAC    - SHA256, 600,000 iterations (OWASP minimum).
     0x02 Argon2id       - t=3, m=64MiB, p=1 (optional, requires argon2-cffi).
 
-Encrypted file format v1 (binary):
-    [4B magic "BHE1"][1B kdf_id][16B salt][12B nonce][ciphertext + 16B GCM tag]
+    Encrypted file format v1 (binary):
+        [4B magic "BHE1"][1B kdf_id][16B salt][12B nonce][ciphertext + 16B GCM tag]
 
-The first six bytes (magic + version + kdf_id) are bound into the AEAD
-associated_data, so flipping the KDF byte or the version invalidates
-the authentication tag — preventing downgrade attacks.
+    The first six bytes (magic + version + kdf_id) are bound into the AEAD
+    associated_data, so flipping the KDF byte or the version invalidates
+    the authentication tag — preventing downgrade attacks.
 
-Legacy format (pre-versioning):
-    [16B salt][12B nonce][ciphertext + 16B GCM tag]
+    Legacy format (pre-versioning):
+        [16B salt][12B nonce][ciphertext + 16B GCM tag]
 
-Legacy files are detected by the absence of the magic prefix and decrypted
-via the old code path for backward compatibility.
+    Legacy files are detected by the absence of the magic prefix and decrypted
+    via the old code path for backward compatibility.
+
+qsafe — hybrid post-quantum public-key encryption (X25519 + ML-KEM-1024 +
+    AES-256-GCM) via the Qsafe project. Files start with a "QSAFE00x"
+    header. Encryption needs only recipient public keys; decryption needs
+    the passphrase-wrapped secret key. See ``qsafe_backend.py``.
 """
 
 from __future__ import annotations
@@ -33,6 +40,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from tqdm import tqdm
+
+from . import qsafe_backend
 
 # ─── Format constants ───────────────────────────────────────────────────────
 MAGIC = b"BHE1"
@@ -134,14 +143,23 @@ def encrypt_file(
     passphrase: str | None = None,
     key_file: str | None = None,
     kdf: str | None = None,
+    backend: str = "aes",
+    qsafe_recipients: list[str] | None = None,
 ) -> Path:
     """
-    Encrypt a single file with AES-256-GCM in the v1 versioned format.
+    Encrypt a single file, writing ``<original>.enc`` and deleting the
+    plaintext only after the encrypted file is durable on disk.
 
-    Writes ``<original>.enc`` atomically and deletes the plaintext only after
-    the encrypted file is durable on disk.
+    backend 'aes' (default) uses AES-256-GCM in the v1 versioned format;
+    backend 'qsafe' encrypts to the given recipient public keys.
     """
     path = Path(path)
+
+    if backend == "qsafe":
+        return _encrypt_file_qsafe(path, qsafe_recipients or [])
+    if backend != "aes":
+        raise ValueError(f"Unknown encryption backend: {backend!r}. Use 'aes' or 'qsafe'.")
+
     plaintext = path.read_bytes()
 
     if key_file:
@@ -163,6 +181,19 @@ def encrypt_file(
 
     enc_path = path.with_name(path.name + ".enc")
     _atomic_write(enc_path, header_prefix + salt + nonce + ciphertext)
+    path.unlink()
+    return enc_path
+
+
+def _encrypt_file_qsafe(path: Path, recipients: list[str]) -> Path:
+    """Encrypt one file to Qsafe recipients; tmp + os.replace keeps it atomic."""
+    enc_path = path.with_name(path.name + ".enc")
+    tmp = enc_path.with_name(enc_path.name + ".tmp")
+    try:
+        qsafe_backend.encrypt_file_to(path, tmp, recipients)
+        os.replace(tmp, enc_path)
+    finally:
+        tmp.unlink(missing_ok=True)
     path.unlink()
     return enc_path
 
@@ -191,15 +222,11 @@ def _decrypt_v1(data: bytes, passphrase: str | None, key_file: str | None) -> by
 
     if kdf_id == KDF_KEYFILE:
         if not key_file:
-            raise ValueError(
-                "File was encrypted with a key file but no key_file was provided for decryption"
-            )
+            raise ValueError("File was encrypted with a key file but no key_file was provided for decryption")
         key = load_key_file(key_file)
     elif kdf_id in (KDF_PBKDF2, KDF_ARGON2ID):
         if not passphrase:
-            raise ValueError(
-                f"File was encrypted with {_kdf_name(kdf_id)} but no passphrase was provided"
-            )
+            raise ValueError(f"File was encrypted with {_kdf_name(kdf_id)} but no passphrase was provided")
         key = derive_key(passphrase, salt, kdf_id=kdf_id)
     else:
         raise ValueError(f"Unsupported KDF id in header: {kdf_id:#x}")
@@ -211,20 +238,45 @@ def decrypt_file(
     enc_path: str | os.PathLike,
     passphrase: str | None = None,
     key_file: str | None = None,
+    qsafe_secret_key: str | None = None,
 ) -> Path:
-    """Decrypt a ``.enc`` file. Detects v1 vs legacy via the magic prefix."""
-    enc_path = Path(enc_path)
-    data = enc_path.read_bytes()
+    """
+    Decrypt a ``.enc`` file. Dispatches by magic prefix: Qsafe files
+    ("QSAFE") decrypt via the qsafe backend using the secret key, BHE1
+    files via AES v1, anything else via the legacy AES path.
 
-    if data[:MAGIC_LEN] == MAGIC:
-        plaintext = _decrypt_v1(data, passphrase, key_file)
-    else:
-        plaintext = _decrypt_legacy(data, passphrase, key_file)
+    For Qsafe files, ``passphrase`` unwraps the secret key.
+    """
+    enc_path = Path(enc_path)
 
     if enc_path.name.endswith(".enc"):
         out_path = enc_path.with_name(enc_path.name[:-4])
     else:
         out_path = enc_path.with_suffix("")
+
+    with open(enc_path, "rb") as f:
+        head = f.read(max(MAGIC_LEN, len(qsafe_backend.QSAFE_MAGIC)))
+
+    if qsafe_backend.is_qsafe_data(head):
+        if not qsafe_secret_key:
+            raise ValueError(
+                "File was encrypted with Qsafe but no qsafe_secret_key was provided. "
+                "Set [ENCRYPTION] qsafe_secret_key to the secret key path."
+            )
+        tmp = out_path.with_name(out_path.name + ".tmp")
+        try:
+            qsafe_backend.decrypt_file_to(enc_path, tmp, qsafe_secret_key, passphrase)
+            os.replace(tmp, out_path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        enc_path.unlink()
+        return out_path
+
+    data = enc_path.read_bytes()
+    if data[:MAGIC_LEN] == MAGIC:
+        plaintext = _decrypt_v1(data, passphrase, key_file)
+    else:
+        plaintext = _decrypt_legacy(data, passphrase, key_file)
 
     _atomic_write(out_path, plaintext)
     enc_path.unlink()
@@ -238,20 +290,40 @@ def encrypt_directory(
     logger=None,
     workers: int = 1,
     kdf: str | None = None,
+    backend: str = "aes",
+    qsafe_recipients: list[str] | None = None,
 ) -> int:
     """
     Encrypt all eligible files in a directory tree.
 
-    Skips files already ending in ``.enc`` and backup manifest JSON files
-    (needed for status/restore lookups without decryption keys).
+    Skips files already ending in ``.enc``, backup manifest JSON files
+    (needed for status/restore lookups without decryption keys), and their
+    detached ``.sig`` signatures (must stay verifiable without decryption).
     """
+    if backend == "qsafe":
+        if not qsafe_recipients:
+            raise ValueError(
+                "Qsafe backend requires at least one recipient public key ([ENCRYPTION] qsafe_recipients)"
+            )
+        if not qsafe_backend.is_available():
+            raise RuntimeError(
+                "Qsafe backend selected but neither the qsafe Python bindings nor "
+                "the qsafe CLI are available. Install Qsafe or set backend = aes."
+            )
+        if logger:
+            logger.info(f"Qsafe engine: {qsafe_backend.engine_description()}")
+    elif backend != "aes":
+        raise ValueError(f"Unknown encryption backend: {backend!r}. Use 'aes' or 'qsafe'.")
+
     directory = Path(directory)
     files = [
         f
         for f in directory.rglob("*")
         if f.is_file()
         and f.suffix != ".enc"
-        and not (f.name.startswith("backup_manifest_") and f.suffix == ".json")
+        and not (
+            f.name.startswith("backup_manifest_") and (f.suffix == ".json" or f.name.endswith(".json.sig"))
+        )
     ]
 
     if not files:
@@ -261,7 +333,14 @@ def encrypt_directory(
     workers = max(1, workers)
 
     def _encrypt_one(file: Path) -> Path:
-        encrypt_file(file, passphrase=passphrase, key_file=key_file, kdf=kdf)
+        encrypt_file(
+            file,
+            passphrase=passphrase,
+            key_file=key_file,
+            kdf=kdf,
+            backend=backend,
+            qsafe_recipients=qsafe_recipients,
+        )
         return file
 
     if workers == 1:
@@ -301,8 +380,9 @@ def decrypt_directory(
     key_file: str | None = None,
     logger=None,
     workers: int = 1,
+    qsafe_secret_key: str | None = None,
 ) -> int:
-    """Decrypt all ``.enc`` files in a directory tree."""
+    """Decrypt all ``.enc`` files in a directory tree (AES or Qsafe, per-file)."""
     directory = Path(directory)
     files = [f for f in directory.rglob("*.enc") if f.is_file()]
 
@@ -313,7 +393,7 @@ def decrypt_directory(
     workers = max(1, workers)
 
     def _decrypt_one(file: Path) -> Path:
-        decrypt_file(file, passphrase=passphrase, key_file=key_file)
+        decrypt_file(file, passphrase=passphrase, key_file=key_file, qsafe_secret_key=qsafe_secret_key)
         return file
 
     if workers == 1:

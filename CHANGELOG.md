@@ -51,10 +51,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every transitive is annotated with its source. Dependency floors bumped:
   cryptography 43->45, paramiko 3.4->3.5, boto3 1.28->1.34.
 - Schema version bumped to **4** for the new `[SSH] known_hosts`,
-  `[ENCRYPTION] kdf` keys.
+  `[ENCRYPTION] kdf` keys, then to **5** for the new `[ENCRYPTION]`
+  Qsafe keys: `backend`, `qsafe_recipients`, `qsafe_secret_key`,
+  `qsafe_sign_key`, `qsafe_sign_pub`, `qsafe_sign_passphrase`.
 
 ### Added
 
+- **Qsafe post-quantum encryption backend** (`[ENCRYPTION] backend = qsafe`):
+  encrypts backups to one or more Qsafe recipient public keys using hybrid
+  X25519 + ML-KEM-1024 + AES-256-GCM (NIST FIPS 203, Level 5). The backup
+  host needs only *public* keys — the passphrase-wrapped secret key
+  (`qsafe_secret_key`) is required only for restore/verify and can live
+  off-host. Multi-recipient escrow supported via comma-separated
+  `qsafe_recipients`. `.enc` files self-describe their format by magic
+  bytes, so AES and Qsafe files coexist and old backups keep restoring.
+  Uses the `qsafe` CLI on PATH or the `libqsafe` Python bindings.
+- **Signed manifests** (`[ENCRYPTION] qsafe_sign_key` / `qsafe_sign_pub`):
+  each `backup_manifest_*.json` gets a detached post-quantum ML-DSA-87
+  signature at backup time. With `qsafe_sign_pub` set, `--verify` marks a
+  manifest with an invalid signature as corrupted, and a point-in-time
+  `--restore` refuses to replay it. Missing signatures (pre-signing
+  backups) only warn. `.sig` files are excluded from encryption. Works
+  with either encryption backend.
 - S3 sync sweeps multipart uploads older than 24 hours under the configured
   prefix at the start of each run. Pairs with a bucket lifecycle rule to keep
   storage costs bounded after crash-killed runs.

@@ -99,7 +99,7 @@ together, this fits.
 | **Tailscale VPN** | Automatic Tailscale VPN connection with pre-auth keys for secure SSH backups over private tailnets |
 | **Cloud Backups (S3)** | Upload backups to AWS S3 with bandwidth throttling, multipart uploads, and concurrency control |
 | **Database Backups** | MySQL dumps via `mysqldump` with `--single-transaction` support and binary log position tracking |
-| **Encryption at Rest** | AES-256-GCM encryption with parallel processing via ThreadPoolExecutor and progress bars |
+| **Encryption at Rest** | AES-256-GCM or post-quantum Qsafe (X25519 + ML-KEM-1024) encryption with parallel processing and progress bars |
 | **Deduplication** | File-level deduplication using hardlinks within and across backup directories with progress bars |
 | **Compression** | ZIP compression with optional WinZip AES-256 password protection (pyzipper) |
 | **Backup Verification** | Verify backup integrity against manifest SHA-256 checksums with encrypted file support |
@@ -593,18 +593,23 @@ Full --------------------------------------------------->
 
 ## Encryption at Rest
 
-Backup Handler supports AES-256-GCM encryption for backup files at rest. Encryption can be enabled via config or the `--encrypt` CLI flag.
+Backup Handler supports encryption for backup files at rest with two backends. Encryption can be enabled via config or the `--encrypt` CLI flag.
+
+| Backend | Scheme | Key model |
+|:--|:--|:--|
+| `aes` (default) | AES-256-GCM, symmetric | Passphrase or 32-byte key file on the backup host |
+| `qsafe` | X25519 + ML-KEM-1024 + AES-256-GCM, hybrid post-quantum public-key ([Qsafe](https://github.com/SP1R4/Qsafe)) | Encrypt to public keys; secret key needed only for restore/verify |
 
 ### How it works
 
-- Each file is encrypted individually with the format: `[16B salt][12B nonce][ciphertext + GCM tag]`
-- Encrypted files get a `.enc` extension; originals are deleted
+- Each file is encrypted individually and gets a `.enc` extension; originals are deleted
+- Every `.enc` file self-describes its format via magic bytes, so AES and Qsafe files can coexist in one backup tree and restores auto-detect the right backend
 - Manifest files (`backup_manifest_*.json`) are **not** encrypted (needed for status and restore lookups)
 - Encryption runs after the manifest is saved and before retention cleanup
 - Parallel encryption is supported via `[ENCRYPTION] workers` for faster processing of large backups
 - Progress bars show encryption/decryption progress
 
-### Key management
+### AES backend — key management
 
 Two key sources are supported (key file takes priority):
 
@@ -619,6 +624,61 @@ workers = 4    # Parallel encryption threads
 # Or use a key file:
 # key_file = /path/to/32byte.key
 ```
+
+### Qsafe backend — post-quantum public-key encryption
+
+The `qsafe` backend uses the [Qsafe](https://github.com/SP1R4/Qsafe) project (either the `qsafe` CLI on PATH or the `libqsafe` Python bindings) to encrypt backups to one or more recipient public keys:
+
+- **The backup host never holds the decryption secret.** A compromised backup server can create backups but cannot read past ones.
+- **Long-term confidentiality.** The hybrid X25519 + ML-KEM-1024 scheme (NIST FIPS 203, Level 5) protects long-retention archives against harvest-now-decrypt-later quantum attacks.
+- **Multi-recipient escrow.** Encrypt to a day-to-day ops key *and* an offline recovery key — any one matching secret key decrypts.
+
+```bash
+# One-time setup: generate a keypair (secret key is passphrase-wrapped)
+qsafe keygen --key-file backup.key --pub-file backup.pub
+# Optionally (Qsafe >= 7) split the secret key for disaster recovery:
+# any 2 of 3 shares recover it if the passphrase is lost
+qsafe split-key --threshold 2 --shares 3 backup
+```
+
+```ini
+[ENCRYPTION]
+enabled = True
+backend = qsafe
+# Recipient public keys (comma-separated). Only these are needed to back up.
+qsafe_recipients = /etc/backup/ops.pub, /etc/backup/escrow.pub
+# Secret key + passphrase: needed only on the machine performing restore/verify.
+qsafe_secret_key = /etc/backup/ops.key
+passphrase = ${QSAFE_PASSPHRASE}
+```
+
+Switching backends never breaks old backups — existing AES `.enc` files remain decryptable and are detected automatically during restore.
+
+### Signed manifests (ML-DSA-87)
+
+Independently of the encryption backend, Backup Handler can sign every backup manifest with a detached post-quantum ML-DSA-87 (Dilithium, Level 5) signature via Qsafe. Manifests drive verification and point-in-time restore, and they are deliberately left unencrypted — signing closes the gap where an attacker with write access to the backup destination could rewrite a manifest to alter what gets restored.
+
+```bash
+# One-time setup: generate an ML-DSA-87 signing keypair
+qsafe sign-keygen --key-file manifest-sign.key --pub-file manifest-sign.pub
+```
+
+```ini
+[ENCRYPTION]
+# Signing key: on the backup host (signs each manifest at backup time)
+qsafe_sign_key = /etc/backup/manifest-sign.key
+qsafe_sign_passphrase = ${QSAFE_SIGN_PASSPHRASE}
+# Public key: on the verify/restore side (authenticates manifests)
+qsafe_sign_pub = /etc/backup/manifest-sign.pub
+```
+
+Behavior when `qsafe_sign_pub` is set:
+
+- `--verify` checks each directory's latest manifest signature before trusting its contents; an **invalid** signature marks the manifest corrupted and its entries are not checked.
+- Point-in-time `--restore` authenticates every manifest it replays; an **invalid** signature aborts the restore.
+- A **missing** signature only warns — backups made before signing was enabled keep working.
+
+The signing *secret* key on the backup host cannot decrypt anything; compromising it allows forging manifests but not reading backups. Manifest `.sig` files are excluded from encryption so they stay verifiable without decryption keys.
 
 ### Compression + Encryption
 
