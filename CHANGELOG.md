@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--restore` refuses to replay it. Missing signatures (pre-signing
   backups) only warn. `.sig` files are excluded from encryption. Works
   with either encryption backend.
+- `--verify` authenticates Qsafe-encrypted files **in place** via the AEAD
+  tag — no plaintext is written to disk during verification (AES files
+  still decrypt to a temp directory for the size check).
+- Qsafe readiness preflight: a backup run aborts (exit 2, with critical
+  alert + status sentinel) before any files are copied when the qsafe
+  engine or configured key files are missing — previously encryption
+  failed *after* the copy, leaving a plaintext backup on disk.
+- RUNBOOK section 6: Qsafe key inventory, key ceremony, Shamir escrow,
+  rotation rules, and escrow-key drill requirements.
 - S3 sync sweeps multipart uploads older than 24 hours under the configured
   prefix at the start of each run. Pairs with a bucket lifecycle rule to keep
   storage costs bounded after crash-killed runs.

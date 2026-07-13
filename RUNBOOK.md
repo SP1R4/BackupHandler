@@ -45,6 +45,10 @@ or a fresh VM.
 - The encryption passphrase or key file, if encryption is enabled. **The key
   is NOT stored on the destination.** Retrieve it from your secrets manager
   (Vault path: fill in before deployment).
+- For Qsafe-encrypted backups (`backend = qsafe`): the `qsafe_secret_key`
+  file **and** its passphrase — see section 6 for where each lives. Any one
+  recipient key decrypts, so the offline escrow key works if the ops key
+  is lost with the host.
 - Root/sudo on the restore target.
 
 **Procedure**
@@ -382,3 +386,75 @@ is misconfigured — fix it before relying on the next scheduled run.
    silent failures survive for months.
 5. If a command in this runbook doesn't match the system's current
    behavior, the runbook is wrong — update it in the same PR as the fix.
+
+---
+
+## 6. Qsafe key management (post-quantum encryption & signed manifests)
+
+When `[ENCRYPTION] backend = qsafe`, backups are encrypted to recipient
+*public* keys and the decryption secret never touches the backup host.
+That inverts the usual key-handling rules, so this section is normative.
+
+### 6.1 Key inventory
+
+| Key | Lives on | Compromise impact |
+|:--|:--|:--|
+| `ops.pub`, `escrow.pub` (encryption public keys) | Backup host (`qsafe_recipients`) | None — public by design |
+| `ops.key` (day-to-day decryption secret) | Restore/verify host or secrets manager. **Never the backup host.** | Read every backup |
+| `escrow.key` (recovery decryption secret) | Offline: sealed envelope, HSM, or Shamir shares | Read every backup |
+| `manifest-sign.key` (ML-DSA-87 signing secret) | Backup host (`qsafe_sign_key`) | Forge manifests — cannot read backups |
+| `manifest-sign.pub` (signing public key) | Restore/verify host (`qsafe_sign_pub`) | None |
+| Passphrases (wrap each secret key) | Secrets manager only (Vault path: fill in before deployment) | Unwraps the matching key |
+
+### 6.2 Key ceremony (one-time)
+
+Run on a trusted admin workstation, **not** on the backup host:
+
+```bash
+# Day-to-day keypair
+qsafe keygen --key-file ops.key --pub-file ops.pub
+# Offline escrow keypair (second recipient — any one key decrypts)
+qsafe keygen --key-file escrow.key --pub-file escrow.pub
+# Manifest signing keypair
+qsafe sign-keygen --key-file manifest-sign.key --pub-file manifest-sign.pub
+```
+
+Then distribute:
+
+1. Copy `ops.pub`, `escrow.pub`, and `manifest-sign.key` to the backup
+   host; reference them in `[ENCRYPTION]`.
+2. Move `ops.key` to the designated restore host or secrets manager.
+3. Take `escrow.key` offline. With Qsafe >= 7, prefer Shamir shares over a
+   single artifact — any 2 of 3 shares recover the key if the passphrase
+   custodian is unavailable:
+   ```bash
+   qsafe split-key --threshold 2 --shares 3 escrow
+   # -> escrow.share1..3: hand to separate custodians, then destroy escrow.key
+   ```
+4. Store every passphrase in the secrets manager. A secret key file and
+   its passphrase must never share a storage location.
+
+### 6.3 Rotation
+
+Adding or replacing a recipient only affects **future** backups — old
+`.enc` files remain decryptable solely by the keys they were encrypted to.
+Therefore:
+
+- To rotate: generate the new keypair, update `qsafe_recipients`, and
+  **retain the old secret key until every backup encrypted to it has aged
+  out of retention.** Deleting an old secret key orphans every backup that
+  listed only that recipient.
+- Signing-key rotation is cheaper: old manifests verify against the old
+  public key; keep it alongside the new one until those backups expire.
+
+### 6.4 Drill requirements
+
+The weekly restore drill (docs/restore-drill.md) must exercise the real
+recovery path, not the convenient one:
+
+- At least quarterly, run the drill decrypting with the **escrow** key
+  (reassemble from Shamir shares if split). An escrow key that has never
+  been used in a drill does not count as recovery insurance.
+- If manifest signing is enabled, the drill host must have
+  `qsafe_sign_pub` configured so a tampered manifest fails the drill —
+  restore aborts on an invalid signature by design.

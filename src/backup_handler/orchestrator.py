@@ -338,6 +338,38 @@ def _check_backup_dirs_accessible(logger, backup_dirs):
 # ─── Core Backup Pipeline ───────────────────────────────────────────────────
 
 
+def _check_qsafe_readiness(config_values, encrypt=False):
+    """
+    Return an error message if Qsafe is configured but cannot run, else None.
+
+    Catches missing engine (no bindings, no CLI) and missing key files up
+    front — encryption runs *after* files are copied, so a late failure
+    would leave a plaintext backup on disk believing it was encrypted.
+    """
+    uses_qsafe_backend = (encrypt or config_values.get("encryption_enabled", False)) and config_values.get(
+        "encryption_backend", "aes"
+    ) == "qsafe"
+    sign_key = config_values.get("encryption_qsafe_sign_key")
+
+    if not uses_qsafe_backend and not sign_key:
+        return None
+    if not qsafe_backend.is_available():
+        return (
+            "Qsafe is configured but neither the qsafe Python bindings nor the "
+            "qsafe CLI are available. Install Qsafe or update [ENCRYPTION]."
+        )
+    if uses_qsafe_backend:
+        recipients = qsafe_backend.parse_recipients(config_values.get("encryption_qsafe_recipients"))
+        if not recipients:
+            return "Qsafe backend enabled but no qsafe_recipients configured in [ENCRYPTION]."
+        missing = [r for r in recipients if not Path(r).exists()]
+        if missing:
+            return f"Qsafe recipient public key(s) not found: {', '.join(missing)}"
+    if sign_key and not Path(sign_key).exists():
+        return f"Qsafe manifest signing key not found: {sign_key}"
+    return None
+
+
 def backup_operation(
     logger,
     source_dir=None,
@@ -468,6 +500,27 @@ def backup_operation(
                 "Backup STALE",
                 stale_msg,
             )
+
+        # Qsafe readiness: fail before any files are copied, not at encrypt time
+        qsafe_error = _check_qsafe_readiness(config_values, encrypt)
+        if qsafe_error:
+            logger.error(f"Qsafe preflight FAILED: {qsafe_error}")
+            _critical_alert(
+                logger,
+                config_values,
+                telegram_bot,
+                notifications,
+                "Qsafe preflight FAILED",
+                qsafe_error,
+            )
+            write_status_sentinel(
+                sentinel_path,
+                status="failure",
+                run_id=current_run_id(),
+                message=f"qsafe preflight: {qsafe_error}",
+                extra={"phase": "preflight"},
+            )
+            return 2
 
     # Hooks
     pre_hook = config_values.get("pre_backup_hook")

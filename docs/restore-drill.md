@@ -27,5 +27,10 @@ failed, `4` drill passed but notification failed. **A failed drill is a
 higher-severity incident than a failed backup** — the backups are
 untrusted until a drill passes.
 
+For Qsafe-encrypted backups, the drill host needs `qsafe_secret_key` (and
+its passphrase) configured, and `qsafe_sign_pub` if manifests are signed.
+At least quarterly, run the drill with the **escrow** key instead of the
+ops key — see RUNBOOK section 6.4.
+
 ---
 

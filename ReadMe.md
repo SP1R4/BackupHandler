@@ -632,6 +632,10 @@ The `qsafe` backend uses the [Qsafe](https://github.com/SP1R4/Qsafe) project (ei
 - **The backup host never holds the decryption secret.** A compromised backup server can create backups but cannot read past ones.
 - **Long-term confidentiality.** The hybrid X25519 + ML-KEM-1024 scheme (NIST FIPS 203, Level 5) protects long-retention archives against harvest-now-decrypt-later quantum attacks.
 - **Multi-recipient escrow.** Encrypt to a day-to-day ops key *and* an offline recovery key — any one matching secret key decrypts.
+- **Verification without plaintext.** `--verify` authenticates Qsafe archives in place via the AEAD tag — decrypted data is never written to disk, even to a temp directory.
+- **Fail-fast preflight.** A backup run aborts before copying any files if Qsafe is configured but the engine or key files are missing, so a misconfigured host can't silently produce an unencrypted backup.
+
+See RUNBOOK section 6 for key ceremony, escrow/Shamir custody, rotation, and drill requirements.
 
 ```bash
 # One-time setup: generate a keypair (secret key is passphrase-wrapped)

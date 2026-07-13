@@ -16,6 +16,7 @@ encrypted copies are never modified.
 import tempfile
 from pathlib import Path
 
+from . import qsafe_backend
 from .encryption import decrypt_file
 from .manifest import latest_manifest_path, load_latest_manifest, manifest_signature_status
 from .utils import calculate_checksum
@@ -275,8 +276,10 @@ def _verify_encrypted_file(
     """
     Decrypt an encrypted file to a temporary directory and verify its size.
 
-    The original ``.enc`` file is copied to a temp directory before
-    decryption, ensuring the backup is never modified during verification.
+    Qsafe files are authenticated *in place* — the AEAD tag covers the whole
+    payload, so integrity is proven without ever writing plaintext to disk.
+    AES files are copied to a temp directory, decrypted there, and size-checked,
+    ensuring the backup is never modified during verification.
 
     Parameters:
         logger: Logger instance.
@@ -288,9 +291,21 @@ def _verify_encrypted_file(
         qsafe_secret_key (str): Path to the Qsafe secret key (or None).
 
     Returns:
-        bool: True if size matches, False otherwise.
+        bool: True if the file authenticated (and, for AES, size matches).
     """
     try:
+        with open(enc_path, "rb") as f:
+            head = f.read(len(qsafe_backend.QSAFE_MAGIC))
+        if qsafe_backend.is_qsafe_data(head) and qsafe_secret_key:
+            if qsafe_backend.verify_encrypted_file(enc_path, qsafe_secret_key, passphrase):
+                dir_result["verified"] += 1
+                dir_result["details"].append(f"OK (authenticated in place, no plaintext): {enc_path.name}")
+                return True
+            logger.warning(f"Qsafe authentication failed for {enc_path}")
+            dir_result["corrupted"] += 1
+            dir_result["details"].append(f"AUTHENTICATION FAILED: {enc_path.name}")
+            return False
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_enc = Path(tmp_dir) / enc_path.name
             # Copy enc file to temp to avoid modifying original

@@ -97,6 +97,62 @@ class TestBackendValidation:
         assert manifest_signature_status(manifest, str(pub)) == "missing"
 
 
+class TestQsafeReadiness:
+    def _values(self, **overrides):
+        values = {
+            "encryption_enabled": True,
+            "encryption_backend": "qsafe",
+            "encryption_qsafe_recipients": None,
+            "encryption_qsafe_sign_key": None,
+        }
+        values.update(overrides)
+        return values
+
+    def test_not_configured_is_ready(self):
+        from backup_handler.orchestrator import _check_qsafe_readiness
+
+        assert _check_qsafe_readiness({"encryption_enabled": False}) is None
+
+    def test_missing_recipients(self):
+        from backup_handler.orchestrator import _check_qsafe_readiness
+
+        error = _check_qsafe_readiness(self._values())
+        assert error and "qsafe_recipients" in error
+
+    def test_missing_recipient_key_file(self, tmp_dir):
+        from backup_handler.orchestrator import _check_qsafe_readiness
+
+        error = _check_qsafe_readiness(self._values(encryption_qsafe_recipients=str(tmp_dir / "nope.pub")))
+        assert error and "not found" in error
+
+    def test_missing_sign_key_file(self, tmp_dir):
+        from backup_handler.orchestrator import _check_qsafe_readiness
+
+        error = _check_qsafe_readiness(
+            {
+                "encryption_enabled": False,
+                "encryption_qsafe_sign_key": str(tmp_dir / "nope.key"),
+            }
+        )
+        assert error and "signing key not found" in error
+
+    def test_unavailable_engine(self, monkeypatch, tmp_dir):
+        from backup_handler.orchestrator import _check_qsafe_readiness
+
+        monkeypatch.setattr(qsafe_backend, "is_available", lambda: False)
+        error = _check_qsafe_readiness(self._values())
+        assert error and "available" in error
+
+    def test_ready(self, tmp_dir):
+        from backup_handler.orchestrator import _check_qsafe_readiness
+
+        pub = tmp_dir / "ops.pub"
+        pub.write_bytes(b"key material")
+        if not qsafe_backend.is_available():
+            pytest.skip("no qsafe engine on this machine")
+        assert _check_qsafe_readiness(self._values(encryption_qsafe_recipients=str(pub))) is None
+
+
 class TestConfigValidation:
     def _config(self, encryption: dict) -> configparser.ConfigParser:
         config = configparser.ConfigParser()
@@ -255,6 +311,57 @@ class TestQsafeRoundtrip:
         assert count == 2
         assert (data_dir / "old.txt").read_text() == "aes era"
         assert (data_dir / "new.txt").read_text() == "qsafe era"
+
+    def test_verify_in_place_no_plaintext(self, tmp_dir, keypair, logger):
+        from backup_handler.verify import verify_backup_integrity
+
+        sk, pk = keypair
+        backup_dir = tmp_dir / "backup"
+        backup_dir.mkdir()
+        payload = backup_dir / "file.txt"
+        payload.write_text("payload")
+        size = payload.stat().st_size
+        manifest = backup_dir / "backup_manifest_20260101_120000.json"
+        manifest.write_text(
+            f'{{"mode": "full", "copied": [{{"path": "/src/file.txt", "size": {size}}}],'
+            ' "skipped": [], "failed": []}'
+        )
+        encrypt_file(payload, backend="qsafe", qsafe_recipients=[str(pk)])
+
+        results = verify_backup_integrity(
+            logger, [str(backup_dir)], encryption_passphrase=TEST_PASSPHRASE, qsafe_secret_key=str(sk)
+        )
+        assert results["verified"] == 1
+        assert results["corrupted"] == 0
+        details = results["directories"][str(backup_dir)]["details"]
+        assert any("authenticated in place" in d for d in details)
+        # In-place verification must not leave plaintext anywhere in the backup
+        assert not (backup_dir / "file.txt").exists()
+
+        # Tamper with the ciphertext: authentication must fail
+        enc = backup_dir / "file.txt.enc"
+        blob = bytearray(enc.read_bytes())
+        blob[-1] ^= 0xFF
+        enc.write_bytes(bytes(blob))
+        results = verify_backup_integrity(
+            logger, [str(backup_dir)], encryption_passphrase=TEST_PASSPHRASE, qsafe_secret_key=str(sk)
+        )
+        assert results["corrupted"] == 1
+        details = results["directories"][str(backup_dir)]["details"]
+        assert any("AUTHENTICATION FAILED" in d for d in details)
+
+    def test_verify_encrypted_file_backend(self, tmp_dir, keypair):
+        sk, pk = keypair
+        f = tmp_dir / "x.txt"
+        f.write_text("check me")
+        enc_path = encrypt_file(f, backend="qsafe", qsafe_recipients=[str(pk)])
+
+        assert qsafe_backend.verify_encrypted_file(enc_path, str(sk), TEST_PASSPHRASE)
+
+        blob = bytearray(enc_path.read_bytes())
+        blob[-1] ^= 0xFF
+        enc_path.write_bytes(bytes(blob))
+        assert not qsafe_backend.verify_encrypted_file(enc_path, str(sk), TEST_PASSPHRASE)
 
     def test_sign_verify_roundtrip(self, tmp_dir, sign_keypair):
         sk, pk = sign_keypair

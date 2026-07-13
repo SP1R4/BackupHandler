@@ -186,6 +186,49 @@ def decrypt_file_to(
     _run_cli(argv, passphrase=effective_passphrase)
 
 
+def verify_encrypted_file(
+    in_path: str | os.PathLike[str],
+    secret_key: str | os.PathLike[str],
+    passphrase: str | None,
+) -> bool:
+    """
+    Authenticate a Qsafe ciphertext in place — no plaintext is written.
+
+    Returns True if the file is intact and decryptable with this secret key,
+    False if tampered or not addressed to it. Raises on missing key/engine.
+    """
+    if not Path(secret_key).exists():
+        raise FileNotFoundError(f"Qsafe secret key not found: {secret_key}")
+    effective_passphrase = passphrase or os.environ.get("QSAFE_PASSPHRASE")
+    if not effective_passphrase:
+        raise ValueError(
+            "Qsafe verification requires the secret-key passphrase "
+            "([ENCRYPTION] passphrase or QSAFE_PASSPHRASE)"
+        )
+
+    bindings = _load_bindings()
+    if bindings is not None:
+        try:
+            bindings.verify(str(in_path), str(secret_key), effective_passphrase)
+            return True
+        except Exception:
+            return False
+
+    cli = _cli_path()
+    if cli is None:
+        raise RuntimeError(
+            "Qsafe backend selected but neither the qsafe Python bindings nor "
+            "the qsafe CLI are available. Install Qsafe or set backend = aes."
+        )
+    try:
+        _run_cli(
+            [cli, "verify", "--key-file", str(secret_key), str(in_path)], passphrase=effective_passphrase
+        )
+        return True
+    except RuntimeError:
+        return False
+
+
 def sign_file(
     in_path: str | os.PathLike[str],
     sig_path: str | os.PathLike[str],
